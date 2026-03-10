@@ -1,0 +1,295 @@
+---
+title: "picrust2_prep"
+output: html_document
+date: "2026-01-29"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Tutorial: https://shibalytics.com/teaching/16s/microbiome_analysis_part_v 
+
+*Libraries*
+```{r}
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("ALDEx2")
+
+if(!requireNamespace("BiocManager")){
+  install.packages("BiocManager")
+}
+BiocManager::install("phyloseq")
+
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("KEGGREST")
+
+## ggpicrust2 version fix
+# Remove the old version first
+remove.packages("ggpicrust2")
+
+# Reinstall from GitHub
+devtools::install_github("cafferychen777/ggpicrust2")
+
+# plotting issues
+install.packages("ggprism")
+```
+```{r}
+library(ggplot2)            #ggplot2_4.0.0 
+library(tidyverse)          #tidyverse_2.0.0 
+library(vegan)              #vegan_2.7-1 
+library(data.table)         #data.table_1.17.8
+library(reticulate)         #reticulate_1.43.0
+library(picante)            #picante_1.8.2 
+library(phyloseq)           #phyloseq_1.52.0 
+library(ALDEx2)             #ALDEx2_1.40.0
+library(kableExtra)         #kableExtra_1.4.0 
+library(rstatix)            #rstatix_0.7.2 
+
+library(ggpicrust2)         #ggpicrust2_2.5.2
+library(ggprism)            #ggprism_1.0.7
+library(patchwork)          #patchwork_1.3.2
+library(readr)              #readr_2.1.5
+library(MicrobiomeStat)     #MicrobiomeStat_1.2
+library(KEGGREST)           #KEGGREST_1.48.1
+library(GGally)             #GGally_2.4.0
+library(tibble)             #tibble_3.3.0 
+library(dplyr)              #dplyr_1.1.4
+```
+
+*PSO clean up functions*
+```{r}
+extract_sample_type <- function(id) {
+  # Remove leading '4' if present
+  id_no4 <- sub("^4", "", id)
+  
+  if (grepl("^CC", id_no4)) {
+    return("corncob")
+  } else if (grepl("^WC", id_no4)) {
+    return("woodchip")
+  } else if (grepl("^INF", id_no4)) {
+    return("influent")
+  } else {
+    return(NA)
+  }
+}
+
+extract_bioreactor_id <- function(id) {
+  # If INF sample, reactor ID is "0"
+  id_no4 <- sub("^4", "", id)
+  
+  if (grepl("^INF", id_no4)) {
+    return("0")
+  }
+  
+  matches <- regmatches(id_no4, regexec("^[A-Z]+_([0-9]+)_", id_no4))
+  
+  if (length(matches[[1]]) > 1) {
+    return(matches[[1]][2])
+  } else {
+    return(NA)
+  }
+}
+
+extract_HRT <- function(id) {
+  if (grepl("^4", id)) {
+    return(4)
+  }
+  
+  if (grepl("^INF", id)) {
+    num <- as.numeric(sub("^INF(\\d+)$", "\\1", id))
+    if (!is.na(num)) {
+      if (num <= 20) return(8)
+      if (num >= 21) return(16)
+    }
+    return(NA)
+  }
+  
+  day_str <- sub(".*_(\\d+)W?$", "\\1", id)  # pull numeric from end
+  day <- as.numeric(day_str)
+  
+  if (!is.na(day)) {
+    if (day >= 6 & day <= 20) {
+      return(8)
+    } else if (day >= 21) {
+      return(16)
+    }
+  }
+  
+  return(NA) # if it doesn't match pattern
+}
+
+extract_sample_source <- function(id) {
+  # Check if sample ID ends with "W"
+  if (grepl("W$", id)) {
+    return("water")
+  }
+  if (grepl("^INF", id)) {
+    return("water")
+  }
+  else {
+    return("media")
+  }
+}
+
+extract_week <- function(id) {
+  # 1. If sample starts with "INF", extract Week number after "INF"
+  if (grepl("^INF", id)) {
+    Week_str <- sub("^INF(\\d+)W?$", "\\1", id)
+    Week <- as.numeric(Week_str)
+    return(Week)
+  }
+  # 2. For other sample IDs, extract last number (before optional W at the end)
+  Week_str <- sub(".*_(\\d+)W?$", "\\1", id)
+  Week <- as.numeric(Week_str)
+  if (!is.na(Week)) {
+    return(Week)
+  }
+  return(NA) # return NA if no match
+}
+```
+
+*Useful functions for generating PICRUSt2 input*
+```{r}
+#---- phyloseq_counts_to_df
+# Converts phyloseq into a data frame which can be used to export the ASVs and samples with their counts to a file. This function also adds a new column with the ASV IDs to the front.
+phyloseq_counts_to_df <- function(ps) {
+  df <- as.data.frame(t(otu_table(ps)))
+  df <- cbind("#OTU ID" = rownames(df), df)  # Cheeky way to add a comment to first line
+
+  # Note: we use OTU ID above since at the moment this function is meanly used to pipe files into picrust, which needs the 'OTU ID'.
+  return(df)
+}
+
+#---- write_counts_to_file
+# Write the (raw) counts from a phyloseq object as a data matrix to file.
+#
+# INPUT  ps           : phyloseq object
+#        file_name    : full file name (incl. path if required when not writing
+#                       to working directory)
+write_counts_to_file <- function(ps, filename) {
+  df <- phyloseq_counts_to_df(ps)
+
+  write.table(df,
+              file=filename,
+              sep = "\t",
+              row.names = FALSE)
+}
+
+#---- write_seqs_to_file
+# Write the sequences from a phyloseq object as a fasta file.
+#
+# INPUT  ps           : phyloseq object
+#        filename    : full file name (incl. path if required when not writing
+#                       to working directory)
+write_seqs_to_file <- function(ps, filename) {
+  df <- as.data.frame(refseq(ps))
+
+  unlink(filename)  # make sure we delete before we concatenate below
+
+  names <- rownames(df)
+  for (i in 1:nrow(df)) {
+    cat(paste0(">", names[i]), file=filename, sep="\n", append=TRUE)
+    cat(df[i,1], file=filename, sep="\n", append=TRUE)
+  }
+  message(paste0("Wrote ", nrow(df), " ASV sequences to file ", filename))
+}
+```
+
+*PSO read-in & sample data clean-up*
+```{r}
+# read in
+ps_media_317 <- readRDS("../data/microbial/ps_media_317.rds") # 317 taxa, 114 samples
+
+# samp df
+ps_media_317_df <- sample_data(ps_media_317) |>
+  dplyr::as_tibble() |>
+  #dplyr::mutate and change string types, orders, etc. |>
+  as.data.frame()
+
+rownames(ps_media_317_df) = ps_media_317_df$SampleID
+sample_data(ps_media_317) = data.frame(ps_media_317_df)
+```
+
+*Inspect and filter PSO*
+```{r}
+#--------------------------------------------
+# Filter taxa (ASV) with low abundance (<2)
+#--------------------------------------------
+ps_media_317.p0 <- filter_taxa(ps_media_317, function (x) {sum(x > 0) >= 2}, prune=TRUE) # 317 taxa, 114 samples
+
+#---------------------------------------------------
+# Saving PICRUSt2 input files using functions above
+#---------------------------------------------------
+write_counts_to_file(ps_media_317, filename = "../data/picrust2/raw_counts_317.tsv")
+write_seqs_to_file(ps_media_317, filename = "../data/picrust2/seqs_317.fna")
+```
+
+*################################################################################################################*
+*################################################################################################################*
+#-----------------------------------------------
+### 6) PICRUSt2 - (Fig Prep/Separate Workflow)
+# 317 media samples only, 16-h HRT
+#-----------------------------------------------
+- NOTE: must subset pso with 317 selected taxa first (code for this is under the section "4.5) P/A heatmaps")
+- NOTE: pipeline is run in R terminal in HPC Interactive R session (a micromamba environment named "picrust2" was made beforehand)
+
+```
+#-------------------------------------
+# Loading PICRUSt2 & running pipeline
+#-------------------------------------
+
+micromamba activate picrust2   # <- If starting session after installing 
+
+#------------------------------------------------------------------------
+# FULL PIPELINE (see DBRLC_PICRUSt2.Rmd for more details) - top 317 taxa
+#------------------------------------------------------------------------
+
+# NOTE: one ASV811 was lost
+place_seqs.py -s ../../seqs_317.fna -o out_317.tre -p 2 \
+  --intermediate intermediate_317/place_seqs \
+  --chunk_size 1000
+  
+hsp.py -i 16S -t out_317.tre -o marker_predicted_and_nsti_317.tsv.gz -p 1 -n
+hsp.py -i EC -t out_317.tre -o EC_predicted_317.tsv.gz -p 1
+hsp.py -i KO -t out_317.tre -o KO_predicted_317.tsv.gz -p 1
+
+# 2/316 ASVs were cut due NSTI cut-off of 2.0
+metagenome_pipeline.py -i ../../raw_counts_317.tsv -m marker_predicted_and_nsti_317.tsv.gz -f EC_predicted_317.tsv.gz \
+                       -o EC_metagenome_out_317 --strat_out
+
+# 2/316 ASVs were cut due NSTI cut-off of 2.0
+metagenome_pipeline.py \
+  -i ../../raw_counts_317.tsv \
+  -m marker_predicted_and_nsti_317.tsv.gz \
+  -f KO_predicted_317.tsv.gz \
+  -o KO_metagenome_out_317 \
+  --strat_out
+
+pathway_pipeline.py -i EC_metagenome_out_317/pred_metagenome_contrib.tsv.gz \
+                    -o pathways_out_317 -p 1
+                    
+                    
+add_descriptions.py -i EC_metagenome_out_317/pred_metagenome_unstrat.tsv.gz -m EC \
+                    -o EC_metagenome_out_317/pred_metagenome_unstrat_descrip.tsv.gz
+
+add_descriptions.py -i pathways_out_317/path_abun_unstrat.tsv.gz -m METACYC \
+                    -o pathways_out_317/path_abun_unstrat_descrip.tsv.gz
+
+add_descriptions.py -i KO_metagenome_out_317/pred_metagenome_unstrat.tsv.gz -m KO \
+                    -o KO_metagenome_out_317/pred_metagenome_unstrat_descrip.tsv.gz
+
+cp EC_metagenome_out_317/pred_metagenome_unstrat_descrip.tsv.gz  /work/adina/lilliang/DBRLC/picrust2/EC_317.tsv.gz
+cp KO_metagenome_out_317/pred_metagenome_unstrat_descrip.tsv.gz  /work/adina/lilliang/DBRLC/picrust2/KO_317.tsv.gz
+cp pathways_out_317/path_abun_unstrat_descrip.tsv.gz  /work/adina/lilliang/DBRLC/picrust2/path_317.tsv.gz
+
+cp EC_metagenome_out_317/pred_metagenome_unstrat.tsv.gz  /work/adina/lilliang/DBRLC/picrust2/EC_num_317.tsv.gz
+cp KO_metagenome_out_317/pred_metagenome_unstrat.tsv.gz  /work/adina/lilliang/DBRLC/picrust2/KO_num_317.tsv.gz
+cp pathways_out_317/path_abun_unstrat.tsv.gz  /work/adina/lilliang/DBRLC/picrust2/path_num_317.tsv.gz
+```
+
+
+

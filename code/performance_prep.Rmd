@@ -1,0 +1,256 @@
+---
+title: "performance_prep"
+output: html_document
+date: "2026-01-29"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+*Libraries*
+```{r}
+#--------------------------
+# DBLRC NRE performance
+#--------------------------
+library(tidyverse)          #tidyverse_2.0.0
+library(ggplot2)            #ggplot2_4.0.0 
+library(ggpubr)             #ggpubr_0.6.1
+library(rstatix)            #rstatix_0.7.2 
+library(multcompView)       #multcompView_0.1-10
+library(dplyr)              #dplyr_1.1.4 
+library(lubridate)          #lubridate_1.9.4
+library(car)                #car_3.1-3 
+
+#--------------------------
+# DBRLC qpcr & ghg
+#--------------------------
+library(utils)              #attached base package
+library(R.utils)            #R.utils_2.13.0
+```
+
+*NRE Performance Data Prep*
+```{r}
+#----------------------------------
+# 8 & 16 HRT read in & prep data 
+#----------------------------------
+
+HRT8_16_df <- read_csv("../data/performance/metagenome_columns_2023.csv")
+
+# remove trial data & rename 'sample_ID' to sample_type
+HRT8_16_df <- HRT8_16_df |>
+  filter(!influent_id %in% c(1:5)) |>  
+  dplyr::rename(sample_type = sample_ID)
+
+# removing CC data during column troubleshooting period (10/6/23 - 12/1/23) <- CC 16-h HRT should start on 12/8/23
+HRT8_16_df <- HRT8_16_df |>
+  filter(
+    (sample_type == "CC" & !influent_id %in% 21:27) |
+    (sample_type != "CC")
+  )
+
+# adding HRT column
+HRT8_16_df$HRT <- ifelse(HRT8_16_df$influent_id <= 20, 8, 16)
+
+# converting columns to numeric/factor
+columns_to_num <- c("NOx_conc", "NO2_conc", "NO3_conc", "Ammonia_ammonia_conc", 
+                        "DRP_conc", "TOC_conc", "pH", "DO_conc")
+columns_to_factor <- c("sample_type", "bioreactor_ID", "influent_id", "HRT")
+
+HRT8_16_df <- HRT8_16_df |>
+  mutate_at(vars(all_of(columns_to_num)), ~ as.numeric(as.character(.)))
+
+HRT8_16_df <- HRT8_16_df |>
+  mutate_at(vars(all_of(columns_to_factor)), ~ as.factor(as.character(.)))
+
+# ordering HRT 
+HRT_order <- c("8", "16")
+
+HRT8_16_df <- HRT8_16_df |>
+  mutate(HRT = factor(HRT, levels = HRT_order))
+
+# grabbing influent ids to prep for calculations
+influent_NO3 <- HRT8_16_df |>
+  filter(grepl("influent", sample_type)) |>
+  dplyr::select(influent_id, NO3_conc)
+
+influent_NO3 <- influent_NO3 |>
+  dplyr::rename(NO3_influent = NO3_conc)
+
+# merging for calculation (NO3_conc of influent - NO3_conc of bioreactor)
+HRT8_16_calc <- left_join(HRT8_16_df, influent_NO3, by = "influent_id")
+
+# calculation for (NO3_conc of influent - NO3_conc of bioreactor)
+HRT8_16_calc$NO3_removed <- HRT8_16_calc$NO3_influent - HRT8_16_calc$NO3_conc
+HRT8_16_calc <- HRT8_16_calc[!grepl("influent", HRT8_16_calc$sample_type), ]
+
+# calculate nitrate removal efficiency ((NO3_removed / NO3_influent) * 100) 
+HRT8_16_calc$removal_efficiency <- ((HRT8_16_calc$NO3_removed / HRT8_16_calc$NO3_influent) * 100)
+
+# saving calc table
+#write.csv(HRT8_16_calc, "../data/performance/HRT8_16_NRE_177_data_DBRLC.csv", row.names = FALSE)
+
+#----------------------------------
+# 4 HRT read in & prep data 
+#----------------------------------
+
+HRT4_df <- read_csv("../data/performance/metagenome_columns_2025.csv")
+
+HRT4_df <- HRT4_df |>
+  dplyr::rename(sample_type = sample_ID)
+
+HRT4_df$sample_type <- str_replace_all(HRT4_df$sample_type, "INF", "influent")
+HRT4_df$HRT <- 4
+
+# converting columns to numeric/factor
+columns_to_num <- c("NOx_conc", "NO2_conc", "NO3_conc", "Ammonia_ammonia_conc", 
+                        "DRP_conc", "TOC_conc", "pH", "DO_conc")
+columns_to_factor <- c("sample_type", "bioreactor_ID", "influent_id", "HRT")
+
+HRT4_df <- HRT4_df |>
+  mutate_at(vars(all_of(columns_to_num)), ~ as.numeric(as.character(.)))
+
+HRT4_df <- HRT4_df |>
+  mutate_at(vars(all_of(columns_to_factor)), ~ as.factor(as.character(.)))
+
+# grab influent ids to prep for calculations
+influent_NO3 <- HRT4_df |>
+  filter(grepl("influent", sample_type)) |>
+  dplyr::select(data_collected, influent_id, NO3_conc)
+
+influent_NO3 <- influent_NO3 |>
+  dplyr::rename(NO3_influent = NO3_conc)
+
+# merging for calculation (NO3_conc of influent - NO3_conc of bioreactor)
+HRT4_calc <- left_join(HRT4_df, influent_NO3, by = c("data_collected", "influent_id"))
+
+# calculation for (NO3_conc of influent - NO3_conc of bioreactor)
+HRT4_calc$NO3_removed <- HRT4_calc$NO3_influent - HRT4_calc$NO3_conc
+HRT4_calc <- HRT4_calc[!grepl("influent", HRT4_calc$sample_type), ]
+
+# calculate nitrate removal efficiency ((NO3_removed / NO3_influent) * 100) 
+HRT4_calc$removal_efficiency <- ((HRT4_calc$NO3_removed / HRT4_calc$NO3_influent) * 100)
+
+# saving calc table
+#write.csv(HRT4_calc, "../data/performance/HRT4_NRE_60_data_DBRLC.csv", row.names = FALSE)
+
+#----------------------------------
+# Merging all HRT data together  
+#----------------------------------
+
+# merge & save
+full_wq_df <- rbind(HRT4_calc, HRT8_16_calc)
+
+#write.csv(full_wq_df, "../data/performance/full_NRE_237_data_DBRLC_2026.csv", row.names = FALSE)
+
+# check numeric means - nre
+full_wq_df |>
+  group_by(sample_type, HRT) |>
+  summarise(mean_removal_efficiency = mean(removal_efficiency, na.rm = TRUE),
+            std = sd(removal_efficiency, na.rm = TRUE),
+            n = n())
+
+# check numeric means - toc
+full_wq_df |>
+  group_by(sample_type, HRT) |>
+  summarise(mean_conc= mean(TOC_conc, na.rm = TRUE),
+            std = sd(TOC_conc, na.rm = TRUE),
+            n = n())
+```
+```{r}
+#--------------------------------------------
+# STATS - normality & equal variance testing   
+#--------------------------------------------
+
+## NORMALITY - [data is NOT normal as all p < 0.05]
+# CC p = 7.669194e-08	
+# WC p = 9.004425e-05
+
+# shapiro-wilk test
+full_wq_df |>
+  group_by(sample_type) |>
+  summarise(p_value = shapiro_test(removal_efficiency)$p.value) # p.value > 0.05 indicates normality 
+
+## EQUAL VARIANCE - [data is of equal variance as p.value > 0.05] -> p = 0.2286
+
+# levenes test
+leveneTest(removal_efficiency ~ sample_type * HRT * bioreactor_ID, data = full_wq_df) # p.value > 0.05 indicates equal variance
+```
+
+*GHG Data Prep*
+```{r}
+#------------------------------------------------------------------------------------------------------------------
+# read in & check to see if altered SampleIDs accurately match using the nitrate removal percentages and mg value 
+#------------------------------------------------------------------------------------------------------------------
+
+ghg_data <- read_csv("../data/ghg/GHG_data.csv")
+
+# renaming & selecting cols
+ghg_data <- ghg_data |>
+  dplyr::rename(data_collected = date,
+                SampleID = sample_id) |>
+  dplyr::select(data_collected, SampleID, perc_removed, mgN_removed, TOC, ammonia)
+
+# reading in nre_data and prepping 
+nre_check <- read_csv("../data/performance/full_NRE_237_data_DBRLC_2026.csv")
+
+nre_check$SampleID <- paste(nre_check$sample_type, nre_check$bioreactor_ID, nre_check$influent_id, sep = "-")
+
+## adjusting 4 HRT sample IDs
+nre_check <- nre_check %>%
+  mutate(SampleID = if_else(HRT == 4, paste0("4", SampleID), SampleID))
+
+nre_check <- nre_check |>
+  dplyr::select(data_collected, SampleID, removal_efficiency, NO3_removed, TOC_conc, Ammonia_ammonia_conc)
+
+# merging nre & ghg data to cross check NO3 removal values (to make sure sample IDs are accurate) - ALL SAMPLE IDS HAVE TWO NRE COLS WITH MATCHING %s, so sample IDs are accurate
+ghg_nre_check_data <- merge(ghg_data, nre_check, by = c("data_collected", "SampleID"))
+
+#------------------------------
+# prepping ghg data for saving
+#------------------------------
+ghg_data <- read_csv("../data/ghg/GHG_data.csv")
+
+ghg_data <- ghg_data |>
+  dplyr::rename(data_collected = date,
+                SampleID = sample_id, 
+                HRT = hrt, 
+                SampleType = media,
+                removal_efficiency = perc_removed,
+                NO3_removed = mgN_removed,
+                Time = week,
+                Bioreactor = rep,
+                TOC_conc = TOC,
+                Ammonia_ammonia_conc = ammonia)
+
+# removing CC data during column troubleshooting period (10/6/23 - 12/1/23) <- CC 16-h HRT should start on 12/8/23
+ghg_data <- ghg_data |>
+  filter(!SampleID %in% c("CC-1-21", "CC-2-21", "CC-3-21"))
+
+#write.csv(ghg_data, "../data/ghg/GHG_data_checked.csv", row.names = FALSE)
+
+## converting columns to factor
+columns_to_factor <- c("SampleType", "Bioreactor", "HRT", "pore_vol", "Time")
+
+ghg_data <- ghg_data |>
+  mutate_at(vars(all_of(columns_to_factor)), ~ as.factor(as.character(.)))
+```
+```{r}
+#--------------------------------------------
+# STATS N2O - normality & equal variance testing   
+#--------------------------------------------
+
+## NORMALITY - [data is NOT normal as all p.values are under 0.05]
+# CC	p = 8.923055e-15				
+# WC	p = 6.512430e-21		
+
+# shapiro-wilk test
+ghg_data |>
+  group_by(SampleType) |>
+  summarise(p_value = shapiro_test(g_n2o)$p.value) # p.value > 0.05 indicates normality 
+
+## EQUAL VARIANCE - [data is NOT of equal variance as p.value is under 0.05] -> [p = 1.815e-07]
+
+# levenes test
+leveneTest(g_n2o ~ SampleType * HRT * Bioreactor, data = ghg_data) # p.value > 0.05 indicates equal variance
+```

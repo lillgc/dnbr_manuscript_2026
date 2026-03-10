@@ -1,0 +1,2965 @@
+---
+title: "figures_stats_10Mar26"
+output: html_document
+date: "2026-01-29"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+*Libraries & Analysis Workflow*
+```{r}
+#---------
+# GENERAL
+#---------
+library(tidyverse)        #tidyverse_2.0.0
+library(ggplot2)          #ggplot2_4.0.0 
+library(ggpubr)           #ggpubr_0.6.1
+library(rstatix)          #rstatix_0.7.2  
+library(dplyr)            #dplyr_1.1.4 
+library(patchwork)        #patchwork_1.3.2 
+
+#---------------------------
+### 1) NRE - (Fig1, FigS1)
+# All samples, all HRTs
+#---------------------------
+library(lubridate)        #lubridate_1.9.4
+library(car)              #car_3.1-3 
+library(FSA)              #FSA_0.10.0
+library(pairwiseAdonis)   #pairwiseAdonis_0.4.1
+
+#--------------------------------------
+### 2) NMDS - (Fig2A, FigS2, TableS3)
+# Media samples only, all HRTs
+#--------------------------------------
+library(phyloseq)         #phyloseq_1.52.0
+library(vegan)            #vegan_2.7-1
+library(webshot2)         #webshot2_0.1.2
+library(ggrepel)          #ggrepel_0.9.6 
+
+
+#--------------------------------------------
+### 2.5) Sequence Read Count - writing point
+# Media samples only, all HRTs
+#--------------------------------------------
+
+#-------------------------------
+### 3) VennDiagrams - (Fig2B-D)
+# Media samples only, all HRTs
+#-------------------------------
+library(VennDiagram)      #VennDiagram_1.7.3
+library(png)              #png_0.1-8 
+library(grid)             #base package
+
+#----------------------------------------------------
+# 4) Differential Abundance Analysis - (Fig3A, FigS4)
+# Media samples only, 16-h HRT
+#----------------------------------------------------
+library(ggh4x)            #ggh4x_0.3.1
+
+#-----------------------------------
+### 4.5) P/A heatmaps - (Fig3A)
+# 317 media samples only, all HRTs
+#-----------------------------------
+library(ggnewscale)       #ggnewscale_0.5.2
+
+#--------------------------------------------------------
+### 4.75) Summed relative abundance of se-ASVs - (FigS5)
+# Media samples only, all HRTs
+#--------------------------------------------------------
+library(ggsignif)         #ggsignif_0.6.4 
+
+#----------------------------------------
+### 5) Correlation Analysis - (Fig3B-C)
+# Media samples only, all HRTs
+#----------------------------------------
+
+#-------------------------------------------
+# 6) PICRUSt2 - (Fig4, FigS5)
+# 317 se-asvs, media samples only, 16-h HRT
+#-------------------------------------------
+
+#-----------------------------------------
+### 7) Alpha Diversity - (FigS3, Table S2)
+# Media samples only, all HRTs
+#-----------------------------------------
+
+#-------------NEW 1/29/2026-------------
+
+#-------------------------------
+### 8) Taxonomy
+# Media samples only, all HRTs
+#-------------------------------
+library(RColorBrewer)     #RColorBrewer_1.1-3 
+library(stringr)          #stringr_1.5.2
+```
+
+*Functions*
+```{r}
+# -----------------------
+# PSO clean up functions
+# -----------------------
+
+extract_sample_type <- function(id) {
+  # Remove leading '4' if present
+  id_no4 <- sub("^4", "", id)
+  
+  if (grepl("^CC", id_no4)) {
+    return("corncob")
+  } else if (grepl("^WC", id_no4)) {
+    return("woodchip")
+  } else if (grepl("^INF", id_no4)) {
+    return("influent")
+  } else {
+    return(NA)
+  }
+}
+
+extract_bioreactor_id <- function(id) {
+  # If INF sample, reactor ID is "0"
+  id_no4 <- sub("^4", "", id)
+  
+  if (grepl("^INF", id_no4)) {
+    return("0")
+  }
+  
+  matches <- regmatches(id_no4, regexec("^[A-Z]+_([0-9]+)_", id_no4))
+  
+  if (length(matches[[1]]) > 1) {
+    return(matches[[1]][2])
+  } else {
+    return(NA)
+  }
+}
+
+extract_HRT <- function(id) {
+  if (grepl("^4", id)) {
+    return(4)
+  }
+  
+  if (grepl("^INF", id)) {
+    num <- as.numeric(sub("^INF(\\d+)$", "\\1", id))
+    if (!is.na(num)) {
+      if (num <= 20) return(8)
+      if (num >= 21) return(16)
+    }
+    return(NA)
+  }
+  
+  day_str <- sub(".*_(\\d+)W?$", "\\1", id)  # pull numeric from end
+  day <- as.numeric(day_str)
+  
+  if (!is.na(day)) {
+    if (day >= 6 & day <= 20) {
+      return(8)
+    } else if (day >= 21) {
+      return(16)
+    }
+  }
+  
+  return(NA) # if it doesn't match pattern
+}
+
+extract_sample_source <- function(id) {
+  # Check if sample ID ends with "W"
+  if (grepl("W$", id)) {
+    return("water")
+  }
+  if (grepl("^INF", id)) {
+    return("water")
+  }
+  else {
+    return("media")
+  }
+}
+
+extract_week <- function(id) {
+  # 1. If sample starts with "INF", extract Week number after "INF"
+  if (grepl("^INF", id)) {
+    Week_str <- sub("^INF(\\d+)W?$", "\\1", id)
+    Week <- as.numeric(Week_str)
+    return(Week)
+  }
+  # 2. For other sample IDs, extract last number (before optional W at the end)
+  Week_str <- sub(".*_(\\d+)W?$", "\\1", id)
+  Week <- as.numeric(Week_str)
+  if (!is.na(Week)) {
+    return(Week)
+  }
+  return(NA) # return NA if no match
+}
+
+# -------------
+# VennDiagrams
+# -------------
+# convert ps to presence-absence (1 if present, 0 is not)
+to_presence_absence <- function(x) {
+  x[x > 0] <- 1
+  return(x)
+}
+
+# ------------------------------
+# PICRUSt2 Downstream Functions
+# ------------------------------
+
+# function to convert sample columns to rows
+function_to_long <- function(df) {
+  df |>
+    dplyr::rename(`function` = 1) |>
+    pivot_longer(-`function`, names_to = "SampleID", values_to = "Abundance")
+}
+
+
+# calculate relative abundance within each sample
+relative_abundance <- function(df_long) {
+  df_long |>
+    group_by(SampleID) |>
+    dplyr::mutate(RelAbund = Abundance / sum(Abundance, na.rm = TRUE)) |>
+    ungroup()
+}
+```
+
+*################################################################################################################*
+*################################################################################################################*
+#---------------------------
+### 1) NRE - (Fig1, FigS1)
+# All samples, all HRTs
+#---------------------------
+
+*NRE & GHG Prep*
+```{r}
+#---------------------------------------------------------
+# NRE data read in, string type changes, factor ordering
+#---------------------------------------------------------
+nre_data <- read_csv("../data/performance/full_NRE_237_data_DBRLC_2026.csv")
+
+# converting columns to numeric/factor
+columns_to_num <- c("NOx_conc", "NO2_conc", "NO3_conc", "Ammonia_ammonia_conc", 
+                        "DRP_conc", "TOC_conc", "pH", "DO_conc")
+columns_to_factor <- c("sample_type", "bioreactor_ID", "influent_id", "HRT")
+
+nre_data <- nre_data |>
+  mutate_at(vars(all_of(columns_to_num)), ~ as.numeric(as.character(.)))
+
+nre_data <- nre_data |>
+  mutate_at(vars(all_of(columns_to_factor)), ~ as.factor(as.character(.)))
+
+# ordering HRT
+HRT_order <- c("4", "8", "16")
+
+nre_data <- nre_data |>
+  mutate(HRT = factor(HRT, levels = HRT_order))
+
+#---------------------------------------------------------
+# GHG data read in, string type changes, factor ordering
+#---------------------------------------------------------
+ghg_data <- read_csv("../data/ghg/GHG_data_checked.csv")
+
+# converting columns to factor
+columns_to_factor <- c("HRT", "SampleType", "pore_vol", "Time", "Bioreactor")
+
+ghg_data <- ghg_data |>
+  mutate_at(vars(all_of(columns_to_factor)), ~ as.factor(as.character(.)))
+
+# ordering HRT
+HRT_order <- c("4", "8", "16")
+
+ghg_data <- ghg_data |>
+  mutate(HRT = factor(HRT, levels = HRT_order))
+```
+
+*Figure 1A & Stats*
+```{r, fig.width=6, fig.height=6}
+#------------------------------------------------
+# Plot - NRE comparison by bioreactor rep (1-6)
+#------------------------------------------------
+fig1A <- nre_data |>
+  ggplot(aes(bioreactor_ID, removal_efficiency, fill = sample_type)) +
+  geom_boxplot() +
+  facet_wrap(~HRT) +
+  labs(
+    x = "Bioreactor ID",
+    y = expression("NO"[3]^"  -"~removal~efficiency~" (%)")
+  ) +
+  theme_classic() +
+  scale_fill_manual(
+    values = c("CC" = "#ffa52d", "WC" = "darkseagreen"),
+    name = "Media Type") +
+  scale_y_continuous(limits = c(0, 110)) +
+  theme(legend.position = "bottom",
+        strip.text = element_text(size = 13),
+        panel.grid = element_blank(),
+        axis.text = element_text(size = 13), 
+        axis.title = element_text(size = 13),
+        legend.text = element_text(size = 13))
+```
+```{r}
+#------------------------------------
+# Stats - NRE separated by CC vs WC
+#------------------------------------
+
+# full model comparison [KRUSKAL] - p < 0.05 = signif diff in removal efficiency between sample type
+nre_data |>
+  group_by(HRT) |>
+  kruskal_test(removal_efficiency ~ sample_type)
+```
+
+*Figure 1B & Stats*
+```{r, fig.width=4, fig.height=6}
+#----------------------------------------------------------
+# Plot - NRE comparison across HRT (for each bioreactor)
+#----------------------------------------------------------
+fig1B <- nre_data |>
+  ggplot(aes(HRT, removal_efficiency)) +
+  geom_boxplot(aes(fill = sample_type)) +
+  labs(
+    x = "HRT (hr)",
+    y = expression("NO"[3]^"  -"~removal~efficiency~" (%)")
+  ) +
+  facet_wrap(~bioreactor_ID) +
+  theme_classic() +
+  scale_fill_manual(
+    values = c("CC" = "#ffa52d", "WC" = "darkseagreen"),
+    name = "Media Type") +
+  scale_y_continuous(limits = c(0, 110)) +
+  theme(legend.position = "bottom",
+        strip.text = element_text(size = 13),
+        axis.text = element_text(size = 13), 
+        axis.title = element_text(size = 13),
+        legend.text = element_text(size = 13))
+```
+```{r}
+#----------------------------------------------------------
+# Stats - NRE comparison across HRT (for each bioreactor)
+#----------------------------------------------------------
+
+# full model comparison [KRUSKAL] - p < 0.05 = signif diff in removal efficiency between HRT
+nre_data |>
+  group_by(bioreactor_ID) |>
+  kruskal_test(removal_efficiency ~ HRT) 
+
+# pairwise comparison [DUNN] 
+nre_dunn_br <- nre_data |>
+  group_by(bioreactor_ID) |>
+  dunn_test(removal_efficiency ~ HRT, p.adjust.method = "bonferroni")
+
+nre_dunn_br_sig <- nre_dunn_br |>
+  filter(p.adj.signif != "ns")
+```
+
+*FINAL MAIN: Figure 1*
+```{r, fig.width=10, fig.height=9}}
+fig1 <- fig1A + plot_spacer() + fig1B +
+  plot_layout(widths = c(2, 0.1, 1.3)) 
+
+# save plot
+#ggsave("../raw_figs_301/dnbr_fig1_NRE.png", plot = fig1, width = 10, height = 6, units = "in", dpi = 300)
+```
+
+*Figure S1 A-C & Stats*
+```{r, fig.width=4, fig.height=6}
+#------------------------------------------------
+# Plot - NO2 comparison by bioreactor rep (1-6)
+#------------------------------------------------
+sfig1a <- nre_data |>
+  ggplot(aes(bioreactor_ID, NO2_conc, fill = sample_type)) +
+  geom_boxplot() +
+  facet_wrap(~HRT) +
+  labs(
+#    title = "NO2 conc in CC and WC bioreactors",
+    x = "Bioreactor ID",
+    y = expression("NO"[2]^"  -"~conc~" (mg N/L)")
+  ) +
+  theme_classic() +
+  scale_fill_manual(
+    values = c("CC" = "#ffa52d", "WC" = "darkseagreen"),
+    name = "Media Type") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  theme(legend.position = "bottom",
+        strip.text = element_text(size = 13),
+        axis.text = element_text(size = 13), 
+        axis.title = element_text(size = 13),
+        legend.text = element_text(size = 13))
+
+#--------------------------------------------------
+# Plot - N2O GHG comparison by bioreactor ID (1-6)
+#--------------------------------------------------
+sfig1b <- ghg_data |>
+  ggplot(aes(Bioreactor, g_n2o, fill = SampleType)) +
+  geom_boxplot() +
+  facet_wrap(~HRT) +
+  labs(
+#    title = "N2O emmissions from CC and WC bioreactor replicates", 
+    x = "Media Type", 
+    y = expression("dissolved N"[2]~"O"~(CO[2]~"e")~("g m"^" -3"~"day"^" -1"))
+  ) +
+#  scale_y_log10() +
+  theme_classic() +
+  scale_fill_manual(name = "Media Type",
+                     values = c("#ffa52d", "darkseagreen")) +
+  theme(legend.position = "bottom",
+        strip.text = element_text(size = 13),
+        axis.text = element_text(size = 13), 
+        axis.title = element_text(size = 13),
+        legend.text = element_text(size = 13))
+        
+#------------------------------------------------------
+# Plot - Ammonia conc comparison by bioreactor ID (1-6)
+#------------------------------------------------------
+sfig1c <- nre_data |>
+  ggplot(aes(bioreactor_ID, Ammonia_ammonia_conc, fill = sample_type)) +
+  geom_boxplot() +
+  facet_wrap(~HRT) +
+  labs(
+#    title = "Ammonia/Ammonia conc in CC and WC bioreactors",
+    x = "Bioreactor ID",
+    y = "Ammonia/Ammonium Conc (mg N/L)"
+  ) +
+  theme_classic() +
+  scale_fill_manual(
+    values = c("CC" = "#ffa52d", "WC" = "darkseagreen"),
+    name = "Media Type") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  theme(legend.position = "bottom",
+        strip.text = element_text(size = 13),
+        axis.text = element_text(size = 13), 
+        axis.title = element_text(size = 13),
+        legend.text = element_text(size = 13))
+```
+```{r}
+#------------------
+# Stats - N2O GHG 
+#-----------------
+# numeric means
+n20_means_df <- ghg_data |>
+  group_by(SampleType, HRT) |>
+  summarise(mean_conc= mean(g_n2o, na.rm = TRUE),
+            std = sd(g_n2o, na.rm = TRUE))
+
+# full model comparison [KRUSKAL] - p < 0.05 = signif diff in removal efficiency between sample type [Only @8h HRT is diff signif]
+ghg_data |>
+  group_by(HRT) |>
+  kruskal_test(g_n2o ~ SampleType)
+
+# pairwise comparison [DUNN] 
+ghg_dunn <- ghg_data |>
+  group_by(HRT) |>
+  dunn_test(g_n2o ~ Bioreactor, p.adjust.method = "bonferroni")
+
+ghg_dunn_sig <- ghg_dunn |>
+  filter(p.adj.signif != "ns")
+
+#-------------
+# Stats - NO2 
+#-------------
+# numeric means
+no2_means_df <- nre_data |>
+  group_by(sample_type, HRT) |>
+  summarise(mean_conc= mean(NO2_conc, na.rm = TRUE),
+            std = sd(NO2_conc, na.rm = TRUE))
+
+# full model comparison [KRUSKAL] - p < 0.05 = signif diff in removal efficiency between sample type [Only @4h HRT is diff signif]
+nre_data |>
+  group_by(HRT) |>
+  kruskal_test(NO2_conc ~ sample_type) 
+
+# pairwise comparison [DUNN] 
+no2_dunn <- nre_data |>
+  group_by(HRT) |>
+  dunn_test(NO2_conc ~ bioreactor_ID, p.adjust.method = "bonferroni")
+
+no2_dunn_sig <- no2_dunn |>
+  filter(p.adj.signif != "ns")
+
+#-----------------
+# Stats - Ammonia 
+#-----------------
+
+# numeric means
+nh3_means_df <- nre_data |>
+  group_by(sample_type, HRT) |>
+  summarise(mean_conc= mean(Ammonia_ammonia_conc, na.rm = TRUE),
+            std = sd(NO2_conc, na.rm = TRUE))
+
+# full model comparison [KRUSKAL] - p < 0.05 = signif diff in removal efficiency between sample type [Only @16h HRT is diff signif]
+nre_data |>
+  group_by(HRT) |>
+  kruskal_test(Ammonia_ammonia_conc ~ sample_type) 
+
+# pairwise comparison [DUNN] 
+nh3_dunn <- nre_data |>
+  group_by(HRT) |>
+  dunn_test(Ammonia_ammonia_conc ~ bioreactor_ID, p.adjust.method = "bonferroni")
+
+nh3_dunn_sig <- nh3_dunn |>
+  filter(p.adj.signif != "ns")
+```
+
+*FINAL SUPP: Figure S1*
+```{r, fig.width=20, fig.height=10}}
+figS1 <- sfig1a + plot_spacer() + sfig1b + plot_spacer() + sfig1c +
+  plot_layout(widths = c(2, 0.1, 2, 0.1, 2), ncol = 5) 
+
+# save plot
+#ggsave("../raw_figs_301/dnbr_sfig1_N_spp.png", plot = figS1, width = 10, height = 6, units = "in", dpi = 300)
+```
+
+*################################################################################################################*
+*################################################################################################################*
+#--------------------------------------
+### 2) NMDS - (Fig2A, FigS2, TableS3)
+# Media samples only, all HRTs
+#--------------------------------------
+
+*PSO read-in*
+```{r}
+ps16S_final <- readRDS("../data/microbial/ps16S_final_301_samps.rds")
+ps16_sample_df <- as.data.frame(sample_data(ps16S_final)) 
+
+# media only
+ps_media <- subset_samples(ps16S_final, SampleSource == "media") # 114 samples
+ps_media_samp_df <- sample_data(ps_media)
+```
+
+*MAIN: Figure 2A*
+```{r, fig.width=7, fig.height=6}
+#---------------------------
+# NMDS prep & calculations 
+#---------------------------
+bc_dist <- phyloseq::distance(ps_media, method = "bray")
+set.seed(321)
+nmds_bc <- ordinate(ps_media, method = "NMDS", distance = bc_dist)
+
+nmds_color_map <- c(
+  "corncob" = "#ffa52d",
+  "woodchip" = "darkseagreen"
+)
+
+# stress value
+nmds_bc$stress # 0.1524762
+
+#---------------------------------------------------------
+# Plot - NMDS (comparison between sample type) 
+#---------------------------------------------------------
+fig2a <- plot_ordination(ps_media, nmds_bc, type = "samples", color = "SampleType", shape = "SampleSource") +
+  geom_point(size = 2) +
+  scale_color_manual(values = nmds_color_map, name = "Media Type") +
+  scale_shape_manual(values = c("media" = 5), guide = "none") +
+  facet_wrap(~ HRT) +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        legend.text = element_text(size = 13),
+        strip.text = element_text(size = 15),
+        strip.background = element_rect(fill = "grey85"),
+        panel.grid = element_blank(),
+        axis.text = element_text(size = 15), 
+        axis.title = element_text(size = 15))
+
+#ggsave("../raw_figs_301/dnbr_fig2a_nmds.png", plot = fig2a, width = 7, height = 6, units = "in", dpi = 300)
+```
+```{r}
+set.seed(321)
+#--------------------------------------
+# STATS - NMDS (Within HRT (CC vs WC))
+#--------------------------------------
+# overall test (adonis2)
+metadata <- as(sample_data(ps_media_samp_df), "data.frame")
+
+adonis2(
+  as.matrix(bc_dist) ~ SampleType + HRT,
+  data = metadata,
+  permutations = 999,
+  by = "margin"
+)
+
+# post hoc test (pairwise adonis) <- TABLE 3A
+unique_HRTs <- unique(metadata$HRT)
+pairwise_results_sampleType_by_HRT <- list()
+
+for (hrt_level in unique_HRTs) {
+  subset_samples <- rownames(metadata)[metadata$HRT == hrt_level]
+  if (length(subset_samples) > 1) {  
+    bc_subset <- as.matrix(bc_dist)[subset_samples, subset_samples]
+    type_subset <- metadata[subset_samples, ]$SampleType
+    pw_res <- pairwise.adonis(
+      x = bc_subset,
+      factors = type_subset,
+      p.adjust.m = "BH"
+    )
+    list_name <- paste0("HRT_", hrt_level)
+    pairwise_results_sampleType_by_HRT[[list_name]] <- pw_res
+  }
+}
+```
+
+*Figure S2 A-B & Stats*
+```{r, fig.width=7, fig.height=8}
+#---------------------------------------------------------
+# Plot - NMDS (comparison between sample type/bioreactor) 
+#---------------------------------------------------------
+sfig2b <- plot_ordination(ps_media, nmds_bc, type = "samples", color = "Bioreactor") +
+  geom_point(size = 3) +
+  scale_colour_manual(
+    values = c(
+      "1" = "chocolate", 
+      "2" = "orange",
+      "3" = "chocolate4",
+      "4" = "darkseagreen",
+      "5" = "cadetblue",
+      "6" = "aquamarine4"),
+    name = "Bioreactor ID") +
+  facet_wrap(~ HRT) +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        strip.text = element_text(size = 15),
+        strip.background = element_rect(fill = "grey85"),
+        panel.grid = element_blank(),
+        axis.text = element_text(size = 15), 
+        axis.title = element_text(size = 15),
+        legend.text = element_text(size = 15),
+        legend.title = element_text(size = 15))
+
+#---------------------------------------------------------
+# Plot - NMDS (comparison between sample type & HRT) 
+#---------------------------------------------------------
+sfig2a <- plot_ordination(ps_media, nmds_bc, type = "samples", color = "SampleType", shape = "HRT") +
+  geom_point(size = 3) +
+  scale_color_manual(values = nmds_color_map, name = "Media Type") +
+  scale_shape_manual(values = c("4" = 5, "8" = 16, "16" = 2)) +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        axis.text = element_text(size = 15),
+        panel.grid = element_blank(),
+        axis.title = element_text(size = 15),
+        legend.text = element_text(size = 15),
+        legend.title = element_text(size = 15))
+```
+```{r}
+set.seed(321)
+#---------------------------------------------------------
+# STATS - NMDS (Within HRT (Bioreactor vs Bioreactor)) 
+#---------------------------------------------------------
+# overall test (adonis2) 
+metadata <- as(sample_data(ps_media_samp_df), "data.frame")
+
+adonis2(
+  as.matrix(bc_dist) ~ Bioreactor + HRT,
+  data = metadata,
+  permutations = 999,
+  by = "margin"
+)
+
+# post hoc test (pairwise adonis) 
+unique_HRTs <- unique(metadata$HRT)
+pairwise_results_bioreactors_by_HRT <- list()
+
+for (hrt_level in unique_HRTs) {
+  subset_samples <- rownames(metadata)[metadata$HRT == hrt_level]
+  if (length(subset_samples) > 1) {  
+    bc_subset <- as.matrix(bc_dist)[subset_samples, subset_samples]
+    bioreactor_subset <- metadata[subset_samples, ]$Bioreactor
+    pw_res <- pairwise.adonis(
+      x = bc_subset,
+      factors = bioreactor_subset,
+      p.adjust.m = "BH"
+    )
+    list_name <- paste0("HRT_", hrt_level)
+    pairwise_results_bioreactors_by_HRT[[list_name]] <- pw_res
+  }
+}
+
+pairwise_BR_4 <- pairwise_results_bioreactors_by_HRT$HRT_4
+pairwise_BR_8 <- pairwise_results_bioreactors_by_HRT$HRT_8
+pairwise_BR_16 <- pairwise_results_bioreactors_by_HRT$HRT_16
+
+#---------------------------------------------------------
+# STATS - NMDS (Within CC & WC (HRT vs HRT)) 
+#---------------------------------------------------------
+set.seed(321)
+# post hoc test (pairwise adonis) - 
+unique_sample_types <- unique(metadata$SampleType)
+pairwise_results_HRT_by_sampletype <- list()
+
+for (sample_type in unique_sample_types) {
+  subset_samples <- rownames(metadata)[metadata$SampleType == sample_type]
+  if (length(subset_samples) > 1) { 
+    bc_subset <- as.matrix(bc_dist)[subset_samples, subset_samples]
+    hrt_subset <- metadata[subset_samples, ]$HRT
+    pw_res <- pairwise.adonis(
+      x = bc_subset,
+      factors = hrt_subset,
+      p.adjust.m = "BH"
+    )
+    list_name <- paste0("SampleType_", sample_type)
+    pairwise_results_HRT_by_sampletype[[list_name]] <- pw_res
+  }
+}
+```
+
+*FINAL SUPP: Figure S2*
+```{r, fig.width=16, fig.height=12}
+sfig2 <- sfig2a + plot_spacer() + sfig2b +
+  plot_layout(ncol = 3, widths = c(1, 0.1, 1))
+
+#ggsave("../raw_figs_301/dnbr_sfig2_nmds.png", plot = sfig2, width = 12, height = 6, units = "in", dpi = 300)
+```
+
+*Rarefied Analysis - media only - not saved*
+```{r}
+# rarefying
+min_depth <- min(sample_sums(ps_media))
+
+ps_m_rare <- rarefy_even_depth(ps_media, 
+                                 sample.size = min_depth, 
+                                 rngseed = 711, 
+                                 replace = FALSE) # 895OTUs were removed bc no longer present in any sample after random subsampling
+
+ps_m_rare_df <- sample_data(ps_m_rare)
+
+# calculations
+bc_dist_rare <- phyloseq::distance(ps_m_rare, method = "bray")
+set.seed(343)
+nmds_bc_rare <- ordinate(ps_m_rare, method = "NMDS", distance = bc_dist_rare)
+
+nmds_rare_color_map <- c(
+  "corncob" = "#ffa52d",
+  "woodchip" = "darkseagreen"
+)
+
+nmds_bc_rare$stress # 0.1517114
+
+# plot
+plot_ordination(ps_m_rare, nmds_bc_rare, type = "samples", color = "SampleType") +
+  geom_point(size = 2) +
+  scale_color_manual(values = nmds_rare_color_map, name = "Sample Type") +
+  facet_wrap(~ HRT) +
+  theme_bw() +
+  theme(
+        strip.text = element_text(size = 15),
+        strip.background = element_rect(fill = "grey85"),
+        panel.grid = element_blank(),
+        axis.text = element_text(size = 13), 
+        axis.title = element_text(size = 13),
+        legend.text = element_text(size = 13))
+
+# stats ----------------------------------------------------------------------------
+
+# overall test (adonis2)
+metadata <- as(sample_data(ps_m_rare_df), "data.frame")
+
+adonis2(
+  as.matrix(bc_dist_rare) ~ SampleType + HRT,
+  data = metadata,
+  permutations = 999,
+  by = "margin"
+)
+
+# post hoc test (pairwise adonis)
+unique_HRTs <- unique(metadata$HRT)
+pairwise_results_sampleType_by_HRT <- list()
+
+for (hrt_level in unique_HRTs) {
+  subset_samples <- rownames(metadata)[metadata$HRT == hrt_level]
+  if (length(subset_samples) > 1) {  
+    bc_subset <- as.matrix(bc_dist_rare)[subset_samples, subset_samples]
+    type_subset <- metadata[subset_samples, ]$SampleType
+    pw_res <- pairwise.adonis(
+      x = bc_subset,
+      factors = type_subset,
+      p.adjust.m = "BH"
+    )
+    list_name <- paste0("HRT_", hrt_level)
+    pairwise_results_sampleType_by_HRT[[list_name]] <- pw_res
+  }
+}
+```
+
+*################################################################################################################*
+*################################################################################################################*
+#--------------------------------------------
+### 2.5) Sequence Read Count - writing point
+# Media samples only, all HRTs
+#--------------------------------------------
+
+*Prep, Plot, & Stats - not saved*
+```{r}
+# adding total reads as a metadata colummn
+sample_data(ps_media)$TotalReads <- sample_sums(ps_media)
+
+# sample data frame
+ps_media_samp_df <- data.frame(sample_data(ps_media), stringsAsFactors = FALSE)
+
+# converting cols to factors
+columns_to_factor <- c("SampleType", "HRT", "Bioreactor")
+
+ps_media_samp_df <- ps_media_samp_df |>
+  mutate_at(vars(all_of(columns_to_factor)), ~ as.factor(as.character(.)))
+
+# ordering HRT
+HRT_order <- c("4", "8", "16")
+
+ps_media_samp_df <- ps_media_samp_df |>
+  mutate(HRT = factor(HRT, levels = HRT_order))
+
+# summarize total reads by HRT & SampleType
+read_summ <- ps_media_samp_df |>
+  group_by(HRT, SampleType) |>
+  dplyr::summarize(Total_Reads = sum(TotalReads, na.rm=TRUE)) |>
+  ungroup()
+
+# taking average
+read_avg <- ps_media_samp_df |>
+  group_by(HRT, SampleType) |>
+  dplyr::summarize(Avg_Reads = mean(TotalReads, na.rm=TRUE)) |>
+  ungroup()
+
+# plot (HRT facet) ----------------------------------------------------------------------------
+stat_test <- ps_media_samp_df %>%
+  group_by(HRT) %>%
+  wilcox_test(TotalReads ~ SampleType) %>%
+  adjust_pvalue(method = "bonferroni") %>%
+  add_xy_position(x = "SampleType")
+
+stat_test$symbol <- "ns"
+
+ps_media_samp_df |>
+  ggplot(aes(x = SampleType, y = TotalReads, fill = SampleType)) +
+  geom_boxplot() +
+  labs(x = "SampleType", y = "Average Sequence Read Count", fill="Sample Type"
+       ) +
+  facet_wrap(~ HRT) +
+  theme_classic() +
+    scale_fill_manual(values = c(corncob = "#ffa52d", woodchip = "darkseagreen")) +
+  stat_pvalue_manual(
+    stat_test,
+    label = "symbol",
+    tip.length = 0.01,
+    hide.ns = FALSE 
+  ) +
+  theme(legend.position = "bottom",
+        axis.text.x = element_blank())
+
+# plot (sample type facet) ----------------------------------------------------------------------------
+ps_media_samp_df %>%
+  group_by(SampleType) %>%
+  wilcox_test(TotalReads ~ HRT) %>%
+  adjust_pvalue(method = "bonferroni") %>%
+  add_xy_position(x = "SampleType")
+
+ps_media_samp_df |>
+  ggplot(aes(x = HRT, y = TotalReads, fill = SampleType)) +
+  geom_boxplot() +
+  labs(x = "SampleType", y = "Average Sequence Read Count", fill="Sample Type"
+       ) +
+  facet_wrap(~ SampleType) +
+  theme_classic() +
+    scale_fill_manual(values = c(corncob = "#ffa52d", woodchip = "darkseagreen")) +
+  theme(legend.position = "bottom",
+        axis.text.x = element_blank())
+```
+
+*################################################################################################################*
+*################################################################################################################*
+#-------------------------------
+### 3) VennDiagrams - (Fig2B-D)
+# Media samples only, all HRTs
+#-------------------------------
+
+*FINAL MAIN: Figure 2 B-D*
+```{r}
+VD_groups <- c("corncob", "woodchip")
+
+VD_media_color_map <- c(
+  "CC" = "#ffa52d",
+  "WC"= "darkseagreen"
+)
+
+#----------------
+# 16 HRT - media
+#----------------
+ps_media_16 <- subset_samples(ps_media, HRT == "16")
+
+# convert to p/a
+pa_ps_media_16 <- transform_sample_counts(ps_media_16, to_presence_absence) #otu_table(pa_ps_media_16)
+
+# set of taxa present in any sample in each group
+group_taxa_media <- lapply(VD_groups, function(gr) {
+  keep <- sample_data(pa_ps_media_16)$SampleType == gr
+  subsetted <- prune_samples(keep, pa_ps_media_16)
+  presence <- taxa_sums(subsetted) > 0
+  taxa_names(pa_ps_media_16)[presence]
+})
+
+names(group_taxa_media) <- VD_groups   # labels lists in 'group_taxa'
+
+media_short_labels <- c("CC", "WC")
+names(media_short_labels) <- VD_groups
+
+# plot (saves to computer)
+venn.diagram(
+  x = group_taxa_media, 
+  category.names = media_short_labels,
+  filename = "../raw_figs_301/dnbr_fig2d_16_VD.png",
+  output = "FALSE",
+  imagetype="png" ,
+  height = 480 , 
+  width = 480 , 
+  resolution = 350,
+  compression = "lzw",
+
+  lwd = 2,
+  lty = 'blank',
+  fill = VD_media_color_map,
+
+  cex = .5,
+  fontface = "bold",
+  fontfamily = "sans",
+
+  cat.cex = 0.4,
+  cat.fontface = "bold",
+  cat.default.pos = "outer",
+  cat.fontfamily = "sans"
+)
+
+#----------------
+# 8 HRT - media
+#----------------
+ps_media_8 <- subset_samples(ps_media, HRT == "8")
+
+# convert to p/a
+pa_ps_media_8 <- transform_sample_counts(ps_media_8, to_presence_absence) #otu_table(pa_ps_media_8)
+
+# set of taxa present in any sample in each group
+group_taxa_media <- lapply(VD_groups, function(gr) {
+  keep <- sample_data(pa_ps_media_8)$SampleType == gr
+  subsetted <- prune_samples(keep, pa_ps_media_8)
+  presence <- taxa_sums(subsetted) > 0
+  taxa_names(pa_ps_media_8)[presence]
+})
+
+names(group_taxa_media) <- VD_groups   # labels lists in 'group_taxa'
+
+media_short_labels <- c("CC", "WC")
+names(media_short_labels) <- VD_groups
+
+# plot (saves to computer)
+venn.diagram(
+  x = group_taxa_media, 
+  category.names = media_short_labels,
+  filename = "../raw_figs_301/dnbr_fig2c_8_VD.png",
+  output = "FALSE",
+  imagetype="png" ,
+  height = 480 , 
+  width = 480 , 
+  resolution = 350,
+  compression = "lzw",
+
+  lwd = 2,
+  lty = 'blank',
+  fill = VD_media_color_map,
+
+  cex = .5,
+  fontface = "bold",
+  fontfamily = "sans",
+
+  cat.cex = 0.4,
+  cat.fontface = "bold",
+  cat.default.pos = "outer",
+  cat.fontfamily = "sans"
+)
+
+#----------------
+# 4 HRT - media
+#----------------
+ps_media_4 <- subset_samples(ps_media, HRT == "4")
+
+# convert to p/a
+pa_ps_media_4 <- transform_sample_counts(ps_media_4, to_presence_absence) #otu_table(pa_ps_media_4)
+
+# set of taxa present in any sample in each group
+group_taxa_media <- lapply(VD_groups, function(gr) {
+  keep <- sample_data(pa_ps_media_4)$SampleType == gr
+  subsetted <- prune_samples(keep, pa_ps_media_4)
+  presence <- taxa_sums(subsetted) > 0
+  taxa_names(pa_ps_media_4)[presence]
+})
+
+names(group_taxa_media) <- VD_groups   # labels lists in 'group_taxa'
+
+media_short_labels <- c("CC", "WC")
+names(media_short_labels) <- VD_groups
+
+# plot (saves to computer)
+venn.diagram(
+  x = group_taxa_media, 
+  category.names = media_short_labels,
+  filename = "../raw_figs_301/dnbr_fig2b_4_VD.png",
+  output = "FALSE",
+  imagetype="png" ,
+  height = 480 , 
+  width = 480 , 
+  resolution = 350,
+  compression = "lzw",
+
+  lwd = 2,
+  lty = 'blank',
+  fill = VD_media_color_map,
+
+  cex = .5,
+  fontface = "bold",
+  fontfamily = "sans",
+
+  cat.cex = 0.4,
+  cat.fontface = "bold",
+  cat.default.pos = "outer",
+  cat.fontfamily = "sans"
+)
+```
+
+*################################################################################################################*
+*################################################################################################################*
+#----------------------------------------------------
+# 4) Differential Abundance Analysis - (Fig3A, FigS4)
+# Media samples only, 16-h HRT
+#----------------------------------------------------
+
+*Prep*
+```{r}
+ps_media_16 <- subset_samples(ps_media, HRT == "16")
+
+# relative abundance (convert raw counts to relative abundances within each sample)
+ps_media_16_rel <- transform_sample_counts(ps_media_16, function(x) x / sum(x))
+
+# melt to long table
+ps_media_16_melt <- psmelt(ps_media_16_rel)
+
+# pulling taxonomic info from melted df
+taxa_unique <- ps_media_16_melt |>
+  distinct(OTU, Kingdom, Phylum, Class, Order, Family, Genus, Species)
+
+# compute group means (CC vs. WC) - (calculate the mean relative abundance of each taxon (OTU) grouped by sample type - one average relative abundance per OTU per SampleType)
+mean_abund <- ps_media_16_melt |>
+  group_by(OTU, SampleType) |>
+  summarise(mean_rel = mean(Abundance), .groups = "drop") |>
+  pivot_wider(names_from = SampleType,
+              values_from = mean_rel,
+              values_fill = 0)
+
+# add back taxnomic columns
+mean_abund <- mean_abund |>
+  left_join(taxa_unique, by = c("OTU")) |>
+  dplyr::select(OTU, corncob, woodchip, Kingdom, Phylum, Class, Order, Family, Genus, Species)
+
+# differential test (Wilcoxon)
+pvals <- ps_media_16_melt |>
+  group_by(OTU) |>
+  summarise(
+    cc_vals = list(Abundance[SampleType == "corncob"]),
+    wc_vals = list(Abundance[SampleType == "woodchip"]),
+    .groups = "drop"
+  ) |>
+  rowwise() |>
+  mutate(
+    p = if (length(unlist(cc_vals)) > 0 &&
+            length(unlist(wc_vals)) > 0) {
+      wilcox.test(unlist(cc_vals), unlist(wc_vals))$p.value
+    } else {
+      NA_real_
+    }
+  ) |>
+  dplyr::select(OTU, p)
+
+mean_abund <- left_join(mean_abund, pvals, by = "OTU")
+mean_abund <- mean_abund |>
+  mutate(
+    sig = case_when(
+      p < 0.001 ~ "***",
+      p < 0.01 ~ "**",
+      p < 0.05 ~ "*",
+      TRUE ~ ""
+  ))
+
+# preparing for plot (all sig)
+mean_abund_sig <- mean_abund |>
+  filter(sig != "")
+
+plot_df_sig <- mean_abund_sig |>
+  pivot_longer(
+    cols = c(corncob, woodchip),
+    names_to = "SampleType",
+    values_to = "rel_abund"
+  ) |>
+  mutate(
+    rel_abund = ifelse(SampleType == "corncob", -rel_abund, rel_abund)
+  )
+
+length(unique(plot_df_sig$Phylum)) # 317 ASVs --> 133 Genus --> 20 Phyla
+
+sig_dif_317 <- unique(plot_df_sig$OTU)
+
+# NOTE: Reason why relative abundance counts are so low are because: The relative abundance number (like 6.1201e-03) means that across all samples in that group, the taxon has on average about 0.006 (or 0.6%) abundance - This reflects the natural variability in microbial communities: taxa can be very abundant in some samples and rare in others, causing the averaged relative abundance to be comparatively low.
+
+#-----------------------------------------------------
+# How many taxa are enriched in CC vs enriched in WC?
+#-----------------------------------------------------
+
+# separating ASVs greater in corn vs ASVs greater in wood chips
+CC_greater <- mean_abund_sig |> filter(corncob > woodchip) |> distinct(OTU)
+WC_greater <- mean_abund_sig |> filter(woodchip > corncob) |> distinct(OTU)
+
+# count ASVs
+nrow(CC_greater) # 71
+nrow(WC_greater) # 246
+
+# list of media-specific ETs
+CC_enriched_taxa <- list(CC_greater$OTU)
+WC_enriched_taxa <- list(WC_greater$OTU)
+
+#--------------------------
+# Log2Fold Change df prep
+#--------------------------
+pseudo <- 1e-6
+
+log2fc_df <- mean_abund |>
+  mutate(
+    log2FC = log2((corncob + pseudo) / (woodchip + pseudo))
+  )
+
+sig_threshold <- 0.05
+
+log2fc_df <- log2fc_df %>%
+  mutate(
+    result = case_when(
+      p < sig_threshold & log2FC > 0 ~ "CC > WC",
+      p < sig_threshold & log2FC < 0 ~ "CC < WC",
+      TRUE ~ "ns"
+    )
+  )
+```
+
+*SUPP FINAL: Figure S4*
+```{r, fig.width=6, fig.height=8}
+sfig5 <- log2fc_df %>%
+  ggplot(aes(x = log2FC, y = -log10(p), color = result)) +
+  geom_point(size = 2, alpha = 0.8) +
+  geom_vline(xintercept = c(0), linetype = "dashed", color = "gray") +
+  geom_hline(yintercept = -log10(sig_threshold), linetype = "dashed", color = "grey") +
+  # geom_segment(aes(x = 0, y = -log10(0.05), xend = 0, yend = 13.21173), color = "red", linetype = "dashed") +
+  # geom_segment(aes(x = 0, y = -log10(0.05), xend = 18.5, yend = -log10(0.05)), color = "red", linetype = "dashed") +
+  scale_color_manual(
+    values = c(
+      "CC > WC" = "#ffa52d",        
+      "CC < WC" = "darkseagreen",
+      "not significant" = "grey70"
+    ),
+    name = "ASV enriched in",
+    labels = c(
+      "CC > WC" = "CC",        
+      "CC < WC" = "WC"
+    )
+  ) +
+  labs(
+    x = "log2 Fold Change",
+    y = "-log10(p-value)"
+  ) +
+  theme_classic() +
+  theme(
+    legend.position = "bottom",
+    legend.text = element_text(size = 20),
+    axis.text = element_text(size = 20),
+    axis.title = element_text(size = 20),
+    legend.title = element_text(size = 20)
+  )
+
+#ggsave("../raw_figs_301/dnbr_sfig5_volcano.png", plot = sfig5, width = 8, height = 6, units = "in", dpi = 300)
+```
+
+*Figure 3A*
+```{r, fig.width=6, fig.height=15}
+# se-ASVs only
+log2fc_df <- log2fc_df |> filter(sig != "")
+
+fig3a <- log2fc_df |>
+  ggplot(aes(x = reorder(OTU, log2FC), y = log2FC, fill = log2FC > 0)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_manual(
+    values = c("TRUE" = "#ffa52d", "FALSE" = "darkseagreen"),
+    labels = c("TRUE" = "CC", "FALSE" = "WC"),
+    name = "Enriched in"
+  ) +
+  labs(
+    title = "16-h HRT",
+    y = "log2 Fold Change", 
+    x = "Each row = Unique se-ASV (317)") +
+  theme_classic() +
+  theme(axis.text.y = element_blank(),
+        legend.position = "bottom",
+        legend.text = element_text(size = 25),
+        axis.text.x = element_text(size = 25),
+        axis.title = element_text(size = 25),
+        legend.title = element_text(size = 25),
+        title = element_text(size = 25))
+```
+
+*ASV ORDER*
+```{r}
+asv_order_317 <- log2fc_df$OTU[order(log2fc_df$log2FC)]
+```
+
+*################################################################################################################*
+*################################################################################################################*
+#-----------------------------------
+### 4.5) P/A heatmaps - (Fig3A)
+# 317 media samples only, all HRTs
+#-----------------------------------
+
+*Filtering for 317 se-ASVs*
+```{r}
+se_asv_317 <- c("ASV1", "ASV10", "ASV101", "ASV102", "ASV103", "ASV104", "ASV105", "ASV1058", "ASV106", "ASV107", "ASV109", "ASV11", "ASV110", "ASV1107", "ASV1109", 
+                "ASV111", "ASV113", "ASV114", "ASV1156", "ASV1158", "ASV117", "ASV118", "ASV119", "ASV12", "ASV120", "ASV123", "ASV127", "ASV129", "ASV13", "ASV131", 
+                "ASV133", "ASV135", "ASV136", "ASV139", "ASV14", "ASV141", "ASV142", "ASV143", "ASV145", "ASV146", "ASV149", "ASV150", "ASV154", "ASV155", "ASV156", 
+                "ASV158", "ASV159", "ASV16", "ASV162", "ASV164", "ASV167", "ASV168", "ASV169", "ASV17", "ASV170", "ASV171", "ASV172", "ASV175", "ASV179", "ASV18", 
+                "ASV181", "ASV184", "ASV190", "ASV195", "ASV197", "ASV2", "ASV20", "ASV201", "ASV202", "ASV203", "ASV204", "ASV209", "ASV21", "ASV210", "ASV211", 
+                "ASV212", "ASV213", "ASV214", "ASV217", "ASV221", "ASV222", "ASV227", "ASV228", "ASV23", "ASV231", "ASV232", "ASV234", "ASV237", "ASV238", "ASV24", 
+                "ASV240", "ASV241", "ASV245", "ASV248", "ASV249", "ASV25", "ASV251", "ASV26", "ASV262", "ASV263", "ASV264", "ASV265", "ASV268", "ASV271", "ASV275", 
+                "ASV277", "ASV280", "ASV285", "ASV289", "ASV291", "ASV292", "ASV293", "ASV295", "ASV296", "ASV298", "ASV299", "ASV30", "ASV300", "ASV303", "ASV305", 
+                "ASV307", "ASV31", "ASV312", "ASV314", "ASV315", "ASV316", "ASV317", "ASV318", "ASV319", "ASV32", "ASV323", "ASV324", "ASV326", "ASV329", "ASV330", 
+                "ASV331", "ASV333", "ASV334", "ASV335", "ASV337", "ASV338", "ASV34", "ASV340", "ASV341", "ASV344", "ASV349", "ASV351", "ASV354", "ASV359", "ASV36", 
+                "ASV361", "ASV362", "ASV364", "ASV370", "ASV373", "ASV379", "ASV38", "ASV380", "ASV382", "ASV385", "ASV389", "ASV39", "ASV390", "ASV391", "ASV393", 
+                "ASV395", "ASV399", "ASV4", "ASV40", "ASV400", "ASV405", "ASV407", "ASV41", "ASV415", "ASV416", "ASV419", "ASV421", "ASV422", "ASV423", "ASV425", 
+                "ASV43", "ASV430", "ASV433", "ASV435", "ASV437", "ASV44", "ASV440", "ASV442", "ASV447", "ASV45", "ASV455", "ASV456", "ASV46", "ASV465", "ASV47", 
+                "ASV470", "ASV471", "ASV478", "ASV48", "ASV484", "ASV486", "ASV490", "ASV491", "ASV499", "ASV5", "ASV50", "ASV501", "ASV502", "ASV503", "ASV504", 
+                "ASV507", "ASV509", "ASV518", "ASV519", "ASV52", "ASV531", "ASV534", "ASV54", "ASV540", "ASV542", "ASV543", "ASV546", "ASV549", "ASV552", "ASV56", 
+                "ASV564", "ASV565", "ASV568", "ASV570", "ASV579", "ASV58", "ASV581", "ASV582", "ASV584", "ASV587", "ASV588", "ASV589", "ASV59", "ASV594", "ASV596", 
+                "ASV598", "ASV6", "ASV60", "ASV600", "ASV617", "ASV62", "ASV621", "ASV635", "ASV638", "ASV64", "ASV640", "ASV642", "ASV646", "ASV65", "ASV651", "ASV652", 
+                "ASV670", "ASV672", "ASV673", "ASV675", "ASV679", "ASV68", "ASV681", "ASV682", "ASV686", "ASV690", "ASV693", "ASV7", "ASV700", "ASV703", "ASV705", "ASV71", 
+                "ASV714", "ASV717", "ASV718", "ASV720", "ASV728", "ASV73", "ASV732", "ASV736", "ASV738", "ASV74", "ASV748", "ASV751", "ASV763", "ASV771", "ASV783", "ASV79", 
+                "ASV798", "ASV8", "ASV806", "ASV809", "ASV810", "ASV811", "ASV82", "ASV825", "ASV826", "ASV835", "ASV838", "ASV842", "ASV843", "ASV85", "ASV86", "ASV87", 
+                "ASV871", "ASV88", "ASV886", "ASV89", "ASV9", "ASV90", "ASV907", "ASV92", "ASV94", "ASV958", "ASV967", "ASV98", "ASV99" )
+
+# check using --> setdiff(sig_dif_317, se_asv_317)
+
+# prune taxa
+ps_media_subset_317 <- prune_taxa(se_asv_317, ps_media) # 317 taxa and 114 samples 
+
+# saving subset for PICRUSt2
+#saveRDS(ps_media_subset_317, file = "../data/microbial/ps_media_317.rds") # 317 taxa, 114 samples
+
+se_asv_317_list <- c("Xanthobacter", "Other", "Pseudorhodoplanes", "Azotobacter", 
+  "Burkholderia-Caballeronia-Paraburkholderia", "Cellulomonas", "Azospira", 
+  "Zoogloea", "Telmatospirillum", "Pseudomonas", "Plot4-2H12", "Afipia", 
+  "Methanobacterium", "Cytophaga", "Methylophilus", "Taibaiella", 
+  "Methanocella", "Mycobacterium", "Bradyrhizobium", "Nevskia", 
+  "Pir2 lineage", "Ellin516", "Sphingomonas", "Geothrix", "Tahibacter", 
+  "Desulfovibrio", "Bryobacter", "Mesorhizobium", "Methanomassiliicoccus", 
+  "Rhizomicrobium", "Caulobacter", "Methylocystis", "Pleomorphomonas", 
+  "Coxiella", "Sediminibacterium", "Bacillus", "Pajaroellobacter", 
+  "Undibacterium", "Edaphobaculum", "Pseudolabrys", "Kaistia", 
+  "Hyphomicrobium", "Rudaea", "Cupriavidus", "Devosia", "Methanosarcina", 
+  "Sphingobium", "Chitinophaga", "Aetherobacter", "Altererythrobacter", 
+  "Prosthecobacter", "Beijerinckia", "Leptolinea", "Terrimicrobium", 
+  "SN8", "Heliimonas", "Aquisphaera", "Paludisphaera", "Fimbriiglobus", 
+  "Microvirgula", "Opitutus", "Chthoniobacter", "Aquicella", "Puia", 
+  "Novosphingobium", "Papillibacter", "Ruminiclostridium", "Dyella", 
+  "LD29", "Anaerolineaceae UCG-001", "Bacteroides", "Pseudoxanthobacter", 
+  "WCHB1-32", "Terrimonas", "Anaerospora", "Fibrisoma", "Thiobacillus", 
+  "Curvibacter", "Pedomicrobium", "Solimonas", "Magnetospirillum", 
+  "Aminobacter", "Desulfosporosinus", "Streptomyces", "Parachlamydia", 
+  "Clostridium sensu stricto 1", "SM1A02", "NK4A214 group", "Ellin6055", 
+  "Gluconacetobacter", "Incertae Sedis", "Sphingoaurantiacus", 
+  "Singulisphaera", "Haliangium", "Christensenellaceae R-7 group", 
+  "Gemmata", "SH3-11", "Rhodopila", "Anaeromyxobacter", 
+  "Allorhizobium-Neorhizobium-Pararhizobium-Rhizobium", "Rhodoplanes", 
+  "Clostridium sensu stricto 12", "Labrys", "Azospirillum", "Inquilinus", 
+  "Steroidobacter", "Gordonia", "Thermomonas", "Nordella", "Rhodovastum", 
+  "Psychrobacter", "Mucilaginibacter", "Galbitalea", "Methanospirillum", 
+  "Acidibacter", "Ferruginibacter", "Thermincola", "Limnohabitans", 
+  "Sporobacter", "Williamsia", "Lacunisphaera", 
+  "Defluviitaleaceae UCG-011", "Reyranella", "Bdellovibrio", 
+  "Anaerolinea", "Spirosoma", "Gemmatimonas", 
+  "Methylobacterium-Methylorubrum", "Sporomusa", "Brevundimonas", 
+  "Tundrisphaera", "Pseudobacteroides", "Spirochaeta 2")
+```
+
+*Figure 3A - 4-h HRT p/a heatmap (& prep)*
+```{r, fig.width=10, fig.height=15}
+# subsetting 
+ps_4HRT <- subset_samples(ps16S_final, HRT == "4")
+ps_4HRT_media <- subset_samples(ps_4HRT, SampleSource == "media")
+ps_4_317 <- prune_taxa(se_asv_317, ps_4HRT_media)
+ps_4_317_df <- data.frame(sample_data(ps_4_317), stringsAsFactors = FALSE)
+
+# correct order of sample IDs - #unique(ps_4_317_df$SampleID) 
+HRT4_sampID_order <- c(
+"4CC_1_0", "4CC_1_7", "4CC_1_11", "4CC_1_14", "4CC_1_18", 
+"4CC_2_0", "4CC_2_4", "4CC_2_7", "4CC_2_11", "4CC_2_14", "4CC_2_18", "4CC_2_21", 
+"4CC_3_0", "4CC_3_4", "4CC_3_7", "4CC_3_11", "4CC_3_14", "4CC_3_18", 
+"4WC_4_4", "4WC_4_8", "4WC_4_11", "4WC_4_14", "4WC_4_21",  
+"4WC_5_0", "4WC_5_4", "4WC_5_11", "4WC_5_14", "4WC_5_21",  
+"4WC_6_0", "4WC_6_4", "4WC_6_11", "4WC_6_14", "4WC_6_18", "4WC_6_21")
+
+ps_4_317_df$SampleID <- factor(ps_4_317_df$SampleID, levels = HRT4_sampID_order)
+sample_data(ps_4_317) <- ps_4_317_df
+
+# relative abundance calculation
+ps_4_317_rel <- transform_sample_counts(ps_4_317, function(x) x / sum(x))
+
+# melt pso
+ps_4_317_rel_abund_melt <- psmelt(ps_4_317_rel) %>%
+  filter(!is.na(OTU), OTU != "NA")
+
+# presence/absence
+ps_4_317_pa <- ps_4_317_rel_abund_melt |>
+  mutate(Present = ifelse(Abundance > 0, 1, 0))
+
+# getting grouping from log2fc_df 
+log2fc_df_labels <- log2fc_df |>
+  dplyr::select(OTU, result)
+
+ps_4_317_pa <- left_join(ps_4_317_pa, log2fc_df_labels, by = "OTU")
+
+ps_4_317_side_annot_df <- ps_4_317_pa %>%
+  distinct(OTU, result) %>%
+  mutate(x = "4-h HRT ID")
+
+ps_4_317_side_annot_df$SampleType <- "corncob" # so annot is only on corncob facted plot, not WC
+
+ps_4_317_pa$OTU <- factor(ps_4_317_pa$OTU, levels = asv_order_317)
+
+# custom strip label
+HRT4_hm_strips <- c(
+  "corncob" = "CC", 
+  "woodchip" = "WC")
+
+# plot ------------------------------------------------------------------------------------------------
+pa_4_plot <- ggplot() +
+  geom_tile(data = ps_4_317_side_annot_df,
+            aes(x = x, y = OTU, fill = result),
+            width = 0.7) +
+  scale_fill_manual(
+    name = "Enriched in",
+    values = c("CC > WC" = "#ffa52d", "CC < WC" = "darkseagreen"),
+    guide = "none"
+  ) +
+  labs(
+    title = "4-h HRT",
+    x = "Each column = One sample",
+    y = "Each row = Unique se-ASV (317)"
+  ) +
+  new_scale_fill() +
+  geom_tile(data = ps_4_317_pa %>% filter(SampleType == "corncob"),
+            aes(x = SampleID, y = OTU, fill = factor(Present)),
+            color = NA) +
+  scale_fill_manual(values = c("0" = "white", "1" = "black"),
+                    name = "Presence", guide = "none") +
+  new_scale_fill() +
+  geom_tile(data = ps_4_317_pa %>% filter(SampleType == "woodchip"),
+            aes(x = SampleID, y = OTU, fill = factor(Present)),
+            color = NA) +
+  scale_fill_manual(values = c("0" = "white", "1" = "black"),
+                    name = "Presence", guide = "none") +
+  facet_wrap2(~ SampleType,
+              scales = "free_x",
+              labeller = as_labeller(HRT4_hm_strips)) +
+  theme_classic() +
+  theme(
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 1),
+    axis.text.x  = element_blank(),
+    axis.text.y  = element_blank(),
+    axis.title.x = element_text(size = 25),
+    axis.title.y = element_text(size = 25),
+    strip.text = element_text(size = 25),
+    title = element_text(size = 25)
+  )
+```
+
+*Figure 3A - 8-h HRT p/a heatmap (& prep)*
+```{r, fig.width=10, fig.height=15}
+# subsetting 
+ps_8HRT <- subset_samples(ps16S_final, HRT == "8")
+ps_8HRT_media <- subset_samples(ps_8HRT, SampleSource == "media")
+ps_8_317 <- prune_taxa(se_asv_317, ps_8HRT_media)
+ps_8_317_df <- data.frame(sample_data(ps_8_317), stringsAsFactors = FALSE)
+
+# correct order of sample IDs - #unique(ps_8_317_df$SampleID) 
+
+HRT8_sampID_order <- c(
+ "CC_1_6", "CC_1_10", "CC_1_15", "CC_1_20",
+ "CC_2_6", "CC_2_15", "CC_2_20",
+ "CC_3_6", "CC_3_10", "CC_3_15", "CC_3_20",
+ "WC_4_6", "WC_4_10", "WC_4_15", "WC_4_20",
+ "WC_5_6", "WC_5_10", "WC_5_15", "WC_5_20",
+ "WC_6_6", "WC_6_10", "WC_6_15", "WC_6_20"
+)
+
+ps_8_317_df$SampleID <- factor(ps_8_317_df$SampleID, levels = HRT8_sampID_order)
+sample_data(ps_8_317) <- ps_8_317_df
+
+# relative abundance calculation
+ps_8_317_rel <- transform_sample_counts(ps_8_317, function(x) x / sum(x))
+
+# melt pso
+ps_8_317_rel_abund_melt <- psmelt(ps_8_317_rel) %>%
+  filter(!is.na(OTU), OTU != "NA")
+
+# presence/absence
+ps_8_317_pa <- ps_8_317_rel_abund_melt |>
+  mutate(Present = ifelse(Abundance > 0, 1, 0))
+
+# getting grouping from log2fc_df 
+log2fc_df_labels <- log2fc_df |>
+  dplyr::select(OTU, result)
+
+ps_8_317_pa <- left_join(ps_8_317_pa, log2fc_df_labels, by = "OTU")
+
+ps_8_317_side_annot_df <- ps_8_317_pa %>%
+  distinct(OTU, result) %>%
+  mutate(x = "8-h HRT ID")
+
+ps_8_317_side_annot_df$SampleType <- "corncob" # so annot is only on corncob facted plot, not WC
+
+ps_8_317_pa$OTU <- factor(ps_8_317_pa$OTU, levels = asv_order_317)
+
+# custom strip label
+HRT8_hm_strips <- c(
+  "corncob" = "CC", 
+  "woodchip" = "WC")
+
+# plot ------------------------------------------------------------------------------------------------
+pa_8_plot <- ggplot() +
+  geom_tile(data = ps_8_317_side_annot_df,
+            aes(x = x, y = OTU, fill = result),
+            width = 0.5) +
+  scale_fill_manual(
+    name = "Enriched in",
+    values = c("CC > WC" = "#ffa52d", "CC < WC" = "darkseagreen"),
+    labels = c("CC > WC" = "CC", "CC < WC" = "WC")
+  ) +
+  labs(
+    title = "8-h HRT",
+    x = "Each column = One sample",
+    y = "Each row = Unique se-ASV (317)"
+  ) +
+  new_scale_fill() +
+  geom_tile(data = ps_8_317_pa %>% filter(SampleType == "corncob"),
+            aes(x = SampleID, y = OTU, fill = factor(Present)),
+            color = NA) +
+  scale_fill_manual(values = c("0" = "white", "1" = "black"),
+                    name = "Presence", guide = "none") +
+  new_scale_fill() +
+  geom_tile(data = ps_8_317_pa %>% filter(SampleType == "woodchip"),
+            aes(x = SampleID, y = OTU, fill = factor(Present)),
+            color = NA) +
+  scale_fill_manual(values = c("0" = "white", "1" = "black"),
+                    name = "Presence", guide = "none") +
+  facet_wrap2(~ SampleType,
+              scales = "free_x",
+              labeller = as_labeller(HRT8_hm_strips)) +
+  theme_classic() +
+  theme(
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 1),
+    axis.text.x  = element_blank(),
+    axis.text.y  = element_blank(),
+    axis.title.x = element_text(size = 25),
+    axis.title.y = element_text(size = 25),
+    strip.text = element_text(size = 25),
+    legend.position = "bottom",
+    legend.text = element_text(size = 25),
+    title = element_text(size = 25)
+  )
+```
+
+*Figure 3A - 16-h HRT p/a heatmap (& prep)*
+```{r, fig.width=10, fig.height=15}
+# subsetting
+ps_16HRT <- subset_samples(ps16S_final, HRT == "16")
+ps_16HRT_media <- subset_samples(ps_16HRT, SampleSource == "media")
+ps_16_317 <- prune_taxa(se_asv_317, ps_16HRT_media)
+ps_16_317_df <- data.frame(sample_data(ps_16_317), stringsAsFactors = FALSE)
+
+# correct order of sample IDs - #unique(ps_16_317_df$SampleID) 
+
+HRT16_sampID_order <- c(
+"CC_1_21", "CC_1_28", "CC_1_29", "CC_1_30", "CC_1_31", "CC_1_32", "CC_1_33", "CC_1_34", "CC_1_35", "CC_1_36", "CC_1_37", "CC_1_38", "CC_2_21",
+"CC_2_28", "CC_2_29", "CC_2_30", "CC_2_31", "CC_2_32", "CC_2_33", "CC_2_34", "CC_2_35", "CC_2_36", "CC_2_37", "CC_2_38", "CC_3_21", "CC_3_28",
+"CC_3_29", "CC_3_30", "CC_3_31", "CC_3_32", "CC_3_33", "CC_3_34", "CC_3_35", "CC_3_36", "CC_3_37", "CC_3_38", "WC_4_21", "WC_4_24", "WC_4_27",
+"WC_4_28", "WC_4_29", "WC_4_30", "WC_4_31", "WC_5_21", "WC_5_24", "WC_5_27", "WC_5_28", "WC_5_29", "WC_5_30", "WC_5_31", "WC_6_21", "WC_6_24",
+"WC_6_27", "WC_6_28", "WC_6_29", "WC_6_30", "WC_6_31"
+)
+
+ps_16_317_df$SampleID <- factor(ps_16_317_df$SampleID, levels = HRT16_sampID_order)
+sample_data(ps_16_317) <- ps_16_317_df
+
+# relative abundance calculation 
+ps_16_317_rel <- transform_sample_counts(ps_16_317, function(x) x / sum(x))
+
+# melt pso
+ps_16_317_rel_abund_melt <- psmelt(ps_16_317_rel) %>%
+  filter(!is.na(OTU), OTU != "NA")
+
+# presence/absence
+ps_16_317_pa <- ps_16_317_rel_abund_melt |>
+  mutate(Present = ifelse(Abundance > 0, 1, 0))
+
+# getting grouping from log2fc_df 
+log2fc_df_labels <- log2fc_df |>
+  dplyr::select(OTU, result)
+
+ps_16_317_pa <- left_join(ps_16_317_pa, log2fc_df_labels, by = "OTU")
+
+ps_16_317_side_annot_df <- ps_16_317_pa %>%
+  distinct(OTU, result) %>%
+  mutate(x = "16-h HRT ID")
+
+ps_16_317_side_annot_df$SampleType <- "corncob" # so annot is only on corncob facted plot, not WC
+
+ps_16_317_pa$OTU <- factor(ps_16_317_pa$OTU, levels = asv_order_317)
+
+# custom strip label
+HRT16_hm_strips <- c(
+  "corncob" = "CC", 
+  "woodchip" = "WC")
+
+# plot ------------------------------------------------------------------------------------------------
+pa_16_plot <- ggplot() +
+  geom_tile(data = ps_16_317_side_annot_df,
+            aes(x = x, y = OTU, fill = result),
+            width = 1) +
+  scale_fill_manual(
+    name = "Enriched in",
+    values = c("CC > WC" = "#ffa52d", "CC < WC" = "darkseagreen"),
+    guide = "none"
+  ) +
+  labs(
+    title = "16-h HRT",
+    x = "Each column = One sample",
+    y = "Each row = Unique se-ASV (317)"
+  ) +
+  new_scale_fill() +
+  geom_tile(data = ps_16_317_pa %>% filter(SampleType == "corncob"),
+            aes(x = SampleID, y = OTU, fill = factor(Present)),
+            color = NA) +
+  scale_fill_manual(values = c("0" = "white", "1" = "black"),
+                    name = "Presence") +
+  new_scale_fill() +
+  geom_tile(data = ps_16_317_pa %>% filter(SampleType == "woodchip"),
+            aes(x = SampleID, y = OTU, fill = factor(Present)),
+            color = NA) +
+  scale_fill_manual(values = c("0" = "white", "1" = "black"),
+                    name = "Presence") +
+  facet_wrap2(~ SampleType,
+              scales = "free_x",
+              labeller = as_labeller(HRT16_hm_strips)) +
+  theme_classic() +
+  theme(
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 1),
+    axis.text.x  = element_blank(),
+    axis.text.y  = element_blank(),
+    axis.title.x = element_text(size = 25),
+    axis.title.y = element_text(size = 25),
+    strip.text = element_text(size = 25),
+    legend.position = "bottom",
+    legend.text = element_text(size = 25),
+    title = element_text(size = 25)
+  )
+```
+
+*FINAL MAIN: Figure 3A*
+```{r, fig.width=30, fig.height=15}
+combined_heatmap <- plot_spacer() + fig3a + pa_16_plot + pa_8_plot + pa_4_plot +
+  plot_layout(ncol = 5, widths = c(0.05, 0.75, 1, 1, 1))
+
+combined_heatmap
+
+#ggsave("../raw_figs_301/dnbr_fig3a.png", plot = combined_heatmap, width = 20, height = 12, units = "in", dpi = 300)
+```
+
+*################################################################################################################*
+*################################################################################################################*
+#--------------------------------------------------------
+### 4.75) Summed relative abundance of se-ASVs - (FigS5)
+# Media samples only, all HRTs
+#--------------------------------------------------------
+
+*se-ASV lists*
+```{r}
+CC_71_se_asvs <- c("ASV1", "ASV10", "ASV101", "ASV105", "ASV106", "ASV107", "ASV109", "ASV11", "ASV12", "ASV13", "ASV146", "ASV149", "ASV150", "ASV154", "ASV156", 
+                   "ASV158", "ASV16", "ASV171", "ASV172", "ASV18", "ASV184", "ASV2", "ASV20", "ASV204", "ASV21", "ASV213", "ASV217", "ASV221", "ASV24", "ASV240", 
+                   "ASV241", "ASV245", "ASV249", "ASV25", "ASV262", "ASV275", "ASV293", "ASV307", "ASV31", "ASV312", "ASV32", "ASV326", "ASV330", "ASV337", "ASV34", 
+                   "ASV341", "ASV36", "ASV395", "ASV4", "ASV40", "ASV423", "ASV44", "ASV46", "ASV484", "ASV490", "ASV54", "ASV570", "ASV58", "ASV59", "ASV6", "ASV690", 
+                   "ASV7", "ASV71", "ASV73", "ASV74", "ASV85", "ASV88", "ASV89", "ASV9", "ASV90", "ASV99" ) 
+
+WC_246_se_asvs <- c("ASV102", "ASV103", "ASV104", "ASV1058", "ASV110", "ASV1107", "ASV1109", "ASV111", "ASV113", "ASV114", "ASV1156", "ASV1158", "ASV117", "ASV118", 
+                    "ASV119", "ASV120", "ASV123", "ASV127", "ASV129", "ASV131", "ASV133", "ASV135", "ASV136", "ASV139", "ASV14", "ASV141", "ASV142", "ASV143", "ASV145", 
+                    "ASV155", "ASV159", "ASV162", "ASV164", "ASV167", "ASV168", "ASV169", "ASV17", "ASV170", "ASV175", "ASV179", "ASV181", "ASV190", "ASV195", "ASV197", 
+                    "ASV201", "ASV202", "ASV203", "ASV209", "ASV210", "ASV211", "ASV212", "ASV214", "ASV222", "ASV227", "ASV228", "ASV23", "ASV231", "ASV232", "ASV234", 
+                    "ASV237", "ASV238", "ASV248", "ASV251", "ASV26", "ASV263", "ASV264", "ASV265", "ASV268", "ASV271", "ASV277", "ASV280", "ASV285", "ASV289", "ASV291", 
+                    "ASV292", "ASV295", "ASV296", "ASV298", "ASV299", "ASV30", "ASV300", "ASV303", "ASV305", "ASV314", "ASV315", "ASV316", "ASV317", "ASV318", "ASV319", 
+                    "ASV323", "ASV324", "ASV329", "ASV331", "ASV333", "ASV334", "ASV335", "ASV338", "ASV340", "ASV344", "ASV349", "ASV351", "ASV354", "ASV359", "ASV361", 
+                    "ASV362", "ASV364", "ASV370", "ASV373", "ASV379", "ASV38", "ASV380", "ASV382", "ASV385", "ASV389", "ASV39", "ASV390", "ASV391", "ASV393", "ASV399", 
+                    "ASV400", "ASV405", "ASV407", "ASV41", "ASV415", "ASV416", "ASV419", "ASV421", "ASV422", "ASV425", "ASV43", "ASV430", "ASV433", "ASV435", "ASV437", 
+                    "ASV440", "ASV442", "ASV447", "ASV45", "ASV455", "ASV456", "ASV465", "ASV47", "ASV470", "ASV471", "ASV478", "ASV48", "ASV486", "ASV491", "ASV499", 
+                    "ASV5", "ASV50", "ASV501", "ASV502", "ASV503", "ASV504", "ASV507", "ASV509", "ASV518", "ASV519", "ASV52", "ASV531", "ASV534", "ASV540", "ASV542", 
+                    "ASV543", "ASV546", "ASV549", "ASV552", "ASV56", "ASV564", "ASV565", "ASV568", "ASV579", "ASV581", "ASV582", "ASV584", "ASV587", "ASV588", "ASV589", 
+                    "ASV594", "ASV596", "ASV598", "ASV60", "ASV600", "ASV617", "ASV62", "ASV621", "ASV635", "ASV638", "ASV64", "ASV640", "ASV642", "ASV646", "ASV65", 
+                    "ASV651", "ASV652", "ASV670", "ASV672", "ASV673", "ASV675", "ASV679", "ASV68", "ASV681", "ASV682", "ASV686", "ASV693", "ASV700", "ASV703", "ASV705", 
+                    "ASV714", "ASV717", "ASV718", "ASV720", "ASV728", "ASV732", "ASV736", "ASV738", "ASV748", "ASV751", "ASV763", "ASV771", "ASV783", "ASV79", "ASV798", 
+                    "ASV8", "ASV806", "ASV809", "ASV810", "ASV811", "ASV82", "ASV825", "ASV826", "ASV835", "ASV838", "ASV842", "ASV843", "ASV86", "ASV87", "ASV871", 
+                    "ASV886", "ASV907", "ASV92", "ASV94", "ASV958", "ASV967", "ASV98") 
+```
+
+*Corncob: proportion of se-ASVs to total ASV community*
+```{r, fig.width=5, fig.height=7}
+# pso subset
+ps_media_cc <- subset_samples(ps_media, SampleType == "corncob")
+
+# pruning 0 abundance ASVs across all samples
+ps_media_cc_otu_mat <- as(otu_table(ps_media_cc), "matrix")
+non0_asvs <- colSums(ps_media_cc_otu_mat) > 0
+ps_media_pruned <- prune_taxa(non0_asvs, ps_media_cc)
+
+# calculating relative abundance within Sample Source, HRT, and Bioreactor
+ps_media_cc_rel_df <- ps_media_pruned |>
+  psmelt() |>
+  as_tibble() |>
+  group_by(Sample, HRT) |>
+  mutate(relative_abund = Abundance / sum(Abundance, na.rm = TRUE)) |> 
+  ungroup()
+
+# se-ASVs vs. non-se-ASVs
+CC_71_se_asvs
+cc_asvs <- unique(ps_media_cc_rel_df$OTU) # 639 (all HRTs)
+CC_non_se_asvs <- setdiff(cc_asvs, CC_71_se_asvs) # 568
+
+# adding classification column for se_asv vs. non_se_asvs
+ps_media_cc_rel_df <- ps_media_cc_rel_df |>
+  mutate(ASV_Group = if_else(OTU %in% CC_71_se_asvs, "CC_se_ASV", "CC_non_se_ASV"))
+
+# For each sample, sum relative abundance of CC_se_ASVs per HRT (and likewise for non_se_ASVs if desired)
+cc_se_sample_relab <- ps_media_cc_rel_df %>%
+  filter(ASV_Group == "CC_se_ASV") %>%
+  group_by(Sample, HRT) %>%
+  summarise(total_cc_se_asv_rel_abund = sum(relative_abund, na.rm = TRUE), .groups = "drop")
+
+cc_se_sample_relab$SampleType <- sapply(cc_se_sample_relab$Sample, extract_sample_type)
+
+# kruskal
+cc_se_sample_relab |>
+  kruskal_test(total_cc_se_asv_rel_abund ~ HRT) # p = 1.02e-10
+
+# Dunn
+cc_se_sample_dunn <- cc_se_sample_relab |>
+  dunn_test(total_cc_se_asv_rel_abund ~ HRT, p.adjust.method = "bonferroni")
+
+# plot
+cc_box <- ggplot(cc_se_sample_relab, aes(x = HRT, y = total_cc_se_asv_rel_abund, fill = SampleType)) +
+  geom_boxplot() +
+#  geom_jitter(width = 0.2, alpha = 0.5) +
+  scale_fill_manual(
+    labels = c("corncob" = "CC"),
+    values = c("corncob" = "#ffa52d"),
+    name = "Media Type") +
+  theme_classic() +
+  labs(x = "HRT", y = "Summed Relative Abundance of CC_se_ASVs") +
+  geom_signif(
+    comparisons = list(c("4", "8"), c("8", "16"), c("4", "16")),
+    annotations = c("ns", "**", "****"),
+    y_position = c(1.00, 1.05, 1.1),   # adjust to be above your highest value
+    tip_length = 0.03,
+    textsize = 6
+  ) +
+  theme(axis.text = element_text(size = 15), 
+        axis.title = element_text(size = 15),
+        legend.position = "bottom",
+        legend.text = element_text(size = 15), 
+        legend.title = element_text(size = 15))
+```
+
+*Woodchip: proportion of se-ASVs to total ASV community*
+```{r, fig.width=5, fig.height=7}
+# pso subset
+ps_media_WC <- subset_samples(ps_media, SampleType == "woodchip")
+
+# pruning 0 abundance ASVs across all samples
+ps_media_WC_otu_mat <- as(otu_table(ps_media_WC), "matrix")
+non0_asvs <- colSums(ps_media_WC_otu_mat) > 0
+ps_media_pruned <- prune_taxa(non0_asvs, ps_media_WC)
+
+# calculating relative abundance within Sample Source, HRT, and Bioreactor
+ps_media_WC_rel_df <- ps_media_pruned |>
+  psmelt() |>
+  as_tibble() |>
+  group_by(Sample, HRT) |>
+  mutate(relative_abund = Abundance / sum(Abundance, na.rm = TRUE)) |> 
+  ungroup()
+
+# se-ASVs vs. non-se-ASVs
+WC_246_se_asvs
+wc_asvs <- unique(ps_media_WC_rel_df$OTU) # 1282 (all HRTs)
+wc_non_se_asvs <- setdiff(wc_asvs, WC_246_se_asvs) # 1036
+
+# adding classification column for se_asv vs. non_se_asvs
+ps_media_WC_rel_df <- ps_media_WC_rel_df |>
+  mutate(ASV_Group = if_else(OTU %in% WC_246_se_asvs, "WC_se_ASV", "WC_non_se_ASV"))
+
+# For each sample, sum relative abundance of WC_se_ASVs per HRT (and likewise for non_se_ASVs if desired)
+WC_se_sample_relab <- ps_media_WC_rel_df %>%
+  filter(ASV_Group == "WC_se_ASV") %>%
+  group_by(Sample, HRT) %>%
+  summarise(total_WC_se_asv_rel_abund = sum(relative_abund, na.rm = TRUE), .groups = "drop")
+
+WC_se_sample_relab$SampleType <- sapply(WC_se_sample_relab$Sample, extract_sample_type)
+
+# kruskal
+WC_se_sample_relab |>
+  kruskal_test(total_WC_se_asv_rel_abund ~ HRT) # p = 2.39e-08
+
+# Dunn
+WC_se_sample_dunn <- WC_se_sample_relab |>
+  dunn_test(total_WC_se_asv_rel_abund ~ HRT, p.adjust.method = "bonferroni")
+
+# plot
+wc_box <- ggplot(WC_se_sample_relab, aes(x = HRT, y = total_WC_se_asv_rel_abund, fill = SampleType)) +
+  geom_boxplot() +
+#  geom_jitter(width = 0.2, alpha = 0.5) +
+  scale_fill_manual(
+    labels = c("woodchip" = "WC"),
+    values = c("woodchip" = "darkseagreen"),
+    name = "Media Type") +
+  theme_classic() +
+  labs(x = "HRT", y = "Summed Relative Abundance of WC_se_ASVs") +
+  geom_signif(
+    comparisons = list(c("4", "8"), c("8", "16"), c("4", "16")),
+    annotations = c("**", "ns", "****"),
+    y_position = c(1.00, 1.05, 1.1),   # adjust to be above your highest value
+    tip_length = 0.03,
+    textsize = 6
+  ) + 
+  theme(axis.text = element_text(size = 15), 
+        axis.title = element_text(size = 15),
+        legend.position = "bottom",
+        legend.text = element_text(size = 15),
+        legend.title = element_text(size = 15))
+```
+
+*FINAL SUPP: se-ASV rel abund box figure*
+```{r, fig.width=10, fig.height=7}
+box_p <- cc_box + plot_spacer() + wc_box + 
+  plot_layout(widths = c(1, 0.1, 1), ncol = 3) 
+
+# save plot
+#ggsave("../raw_figs_301/dnbr_sfig5_se_asv_rel_abund.png", plot = box_p, width = 8, height = 6, units = "in", dpi = 300)
+```
+
+*################################################################################################################*
+*################################################################################################################*
+#----------------------------------------
+### 5) Correlation Analysis - (Fig3B-C)
+# Media samples only, all HRTs
+#----------------------------------------
+
+*NRE data in correlation format*
+```{r}
+nre_df <- read_csv("../data/performance/full_NRE_237_data_DBRLC_2026.csv")
+
+nre_df <- nre_df |> dplyr::rename(
+  SampleType = sample_type,
+  Bioreactor = bioreactor_ID,
+  Week = influent_id)
+
+nre_df$SampleID <- ifelse(
+  nre_df$HRT == 4,
+  paste0("4", paste(nre_df$SampleType, nre_df$Bioreactor, nre_df$Week, sep = "_")),
+  paste(nre_df$SampleType, nre_df$Bioreactor, nre_df$Week, sep = "_")
+)
+
+nre_df <- nre_df |>
+  dplyr::select(SampleID, SampleType, Bioreactor, HRT, Week, removal_efficiency, TOC_conc)
+
+# converting cols to factors
+columns_to_factor <- c("SampleType", "HRT", "Bioreactor")
+
+nre_df <- nre_df |>
+  mutate_at(vars(all_of(columns_to_factor)), ~ as.factor(as.character(.)))
+
+# ordering HRT
+HRT_order <- c("4", "8", "16")
+
+nre_df <- nre_df |>
+  mutate(HRT = factor(HRT, levels = HRT_order))
+```
+
+*Prune taxa prep for CC & WC*
+```{r}
+# CC PSO prune taxa prep
+#------------------------
+ps_media_CC <- subset_samples(ps_media, SampleType == "corncob")
+
+# transform phyloseq counts to relative abundances per sample <- ALL TAXA
+ps_media_CC_rel <- transform_sample_counts(ps_media_CC, function(x) x / sum(x))
+
+# extract OTU table as data.frame (samples as rows) 
+ps_media_CC_otu <- as.data.frame(otu_table(ps_media_CC_rel))
+
+# WC PSO prune taxa prep
+#------------------------
+ps_media_WC <- subset_samples(ps_media, SampleType == "woodchip")
+
+# transform phyloseq counts to relative abundances per sample <- ALL TAXA
+ps_media_WC_rel <- transform_sample_counts(ps_media_WC, function(x) x / sum(x))
+
+# extract OTU table as data.frame (samples as rows)
+ps_media_WC_otu <- as.data.frame(otu_table(ps_media_WC_rel))
+```
+
+*Figure 3B - all CC se-ASVs*
+```{r, fig.width=6, fig.height=8}
+ps_media_CC_71 <- ps_media_CC_otu |>
+  dplyr::select(all_of(CC_71_se_asvs))
+
+# sum relative abundances per sample across selected taxa 
+ps_media_CC_71$SumTaxa <- rowSums(ps_media_CC_71, na.rm = TRUE)
+ps_media_CC_71 <- ps_media_CC_71 |> dplyr::select(SumTaxa, everything())
+
+# add SampleID column for merging
+ps_media_CC_71$SampleID <- rownames(ps_media_CC_71)
+
+# join with nitrate removal efficiency data frame (nre_df must have SampleID and removal_efficiency)
+nre_CC_pso_df <- ps_media_CC_71 |>
+  dplyr::select(SampleID, SumTaxa) |>
+  inner_join(nre_df, by = "SampleID")
+
+# plot - 71 CC se-ASVs & NRE -------------------------------------------------------------------------------------------------------------------
+CC_71_corr_p <- nre_CC_pso_df |>
+  ggplot(aes(x = removal_efficiency, y = SumTaxa, shape = HRT, colour = SampleType)) +
+  geom_point(size = 3) +
+  stat_cor(method = "spearman", 
+           aes(label = paste0("rho = ", ..r.., ", p = ", formatC(..p.., format = "e", digits = 2)), group = 1),
+           output.type = "text",
+           label.x.npc = 0, label.y.npc = 0.95,
+           size = 5, 
+           color = "black") +
+  labs(
+    x = "Nitrate Removal Efficiency (%)",
+    y = "Relative Abundance of CC se-ASVs (71)",
+    color = "Sample Type",
+#    title = "CC se-ASVs only"
+  ) +
+  theme_classic() +
+  scale_color_manual(
+    values = c("CC" = "black"), name = "Media Type"
+  ) + 
+  scale_shape_manual(
+    values = c(
+      "4" = 18, 
+      "8" = 17,
+      "16" = 16
+    )
+  ) +
+  theme(legend.position = "bottom",
+        axis.text = element_text(size = 20), 
+        axis.title = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        legend.title = element_text(size = 20),
+        axis.title.y = element_text(margin = margin(r = 10)))
+
+
+# checking small p-value <- p = 1.402e-13, rho = 0.7873758 
+cor.test(
+  nre_CC_pso_df$removal_efficiency,
+  nre_CC_pso_df$SumTaxa,
+  method = "spearman",
+  exact  = FALSE   
+)
+```
+
+*Figure 3C - all WC se-ASVs*
+```{r, fig.width=6, fig.height=8}
+ps_media_WC_246 <- ps_media_WC_otu |>
+  dplyr::select(all_of(WC_246_se_asvs))
+
+# sum relative abundances per sample across selected taxa 
+ps_media_WC_246$SumTaxa <- rowSums(ps_media_WC_246, na.rm = TRUE)
+ps_media_WC_246 <- ps_media_WC_246 |> dplyr::select(SumTaxa, everything())
+
+# add SampleID column for merging
+ps_media_WC_246$SampleID <- rownames(ps_media_WC_246)
+
+# join with nitrate removal efficiency data frame (nre_df must have SampleID and removal_efficiency)
+nre_WC_pso_df <- ps_media_WC_246 |>
+  dplyr::select(SampleID, SumTaxa) |>
+  inner_join(nre_df, by = "SampleID")
+
+# plot - 246 WC se-ASVs & NRE -------------------------------------------------------------------------------------------------------------------
+WC_246_corr_p <- nre_WC_pso_df |>
+  ggplot(aes(x = removal_efficiency, y = SumTaxa, shape = HRT, colour = SampleType)) +
+  geom_point(size = 3) +
+  stat_cor(method = "spearman", 
+           aes(label = paste0("rho = ", ..r.., ", p = ", formatC(..p.., format = "e", digits = 2)), group = 1),
+           output.type = "text",
+           label.x.npc = 0.5, label.y.npc = 0.4,
+           size = 5, 
+           color = "black") +
+  labs(
+    x = "Nitrate Removal Efficiency (%)",
+    y = "Relative Abundance of WC se-ASVs (246)",
+    color = "Sample Type",
+#    title = "WC se-ASVs only"
+  ) +
+  theme_classic() +
+  scale_color_manual(
+    values = c("WC" = "black"),
+    name = "Media Type"
+  ) + 
+  scale_shape_manual(
+    values = c(
+      "4" = 18, 
+      "8" = 17,
+      "16" = 16
+    )
+  ) +
+  theme(legend.position = "bottom",
+        axis.text = element_text(size = 20), 
+        axis.title = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        legend.title = element_text(size = 20),
+        axis.title.y = element_text(margin = margin(r = 10)))
+
+
+# checking small p-value <- p = 0.02242, rho = 0.3324468 
+cor.test(
+  nre_WC_pso_df$removal_efficiency,
+  nre_WC_pso_df$SumTaxa,
+  method = "spearman",
+  exact  = FALSE  
+)
+```
+
+*FINAL MAIN: Figure 3 B-C*
+```{r, fig.width=14, fig.height=8}
+se_ASVs_71_246_fig <- plot_spacer() + CC_71_corr_p + plot_spacer() + WC_246_corr_p +
+  plot_layout(widths = c(0.05, 1, 0.1, 1), ncol = 4) 
+
+# save plot
+#ggsave("../raw_figs_301/dnbr_fig3b_c.png", plot = se_ASVs_71_246_fig, width = 14, height = 8, units = "in", dpi = 300)
+```
+
+*################################################################################################################*
+*################################################################################################################*
+#-------------------------------------------
+# 6) PICRUSt2 - (Fig4, FigS5)
+# 317 se-asvs, media samples only, 16-h HRT
+#-------------------------------------------
+
+*PICRUSt2 output files read in*
+```{r}
+ps_media_317_df <- sample_data(ps_media_subset_317) |>
+  dplyr::as_tibble() |>
+  as.data.frame()
+
+rownames(ps_media_317_df) = ps_media_317_df$SampleID
+sample_data(ps_media_subset_317) = data.frame(ps_media_317_df)
+
+# ensure sample df is read in from above code
+ps_media_317_df 
+
+# read in files - with descriptions
+KO_raw <- read_tsv("../data/picrust2/KO_317.tsv")
+
+# files w/o descriptions <- since functions need numeric only data
+KO_num <- read_tsv("../data/picrust2/KO_num_317.tsv")
+```
+
+*PICRUSt2 downstream prep*
+```{r}
+# converting raw abundance files 
+KO_long <- function_to_long(KO_num)
+KO_rel <- relative_abundance(KO_long)
+
+# sample mapping <- all sample names should be identical
+sample_info <- tibble(
+  SampleID = unique(KO_rel$SampleID),
+  SampleType = if_else(str_detect(SampleID, "CC"), "CC", 
+           if_else(str_detect(SampleID, "WC"), "WC", NA_character_))
+)
+
+# adding rep & HRT
+sample_info$Bioreactor <- sapply(sample_info$SampleID, extract_bioreactor_id)
+sample_info$HRT <- sapply(sample_info$SampleID, extract_HRT)
+sample_info$Time <- sapply(sample_info$SampleID, extract_week)
+
+# converting cols to factors
+columns_to_factor <- c("SampleType", "HRT", "Bioreactor", "Time")
+
+sample_info <- sample_info |>
+  mutate_at(vars(all_of(columns_to_factor)), ~ as.factor(as.character(.)))
+
+# ordering HRT
+HRT_order <- c("4", "8", "16")
+
+sample_info <- sample_info |>
+  mutate(HRT = factor(HRT, levels = HRT_order))
+
+# retreiving descriptions from PICRUSt2 raw outputs
+KO_descrip <- KO_raw |> dplyr::select(`function`, description)
+
+# output files with sample information
+KO_rel <- left_join(KO_rel, sample_info, by = "SampleID")
+
+# output files with functional descriptions
+KO_rel <- left_join(KO_rel, KO_descrip, by = "function")
+
+#----------------
+# KO Figure Prep
+#----------------
+# specific denitrification-associated K-numbers (source: https://www.kegg.jp/module/M00529)
+KO_IDs <- c("ko:K00370", "ko:00371", "ko:K00374", "ko:K02567", "ko:K02568", "ko:K00368", "ko:K15864", "ko:K04561", "ko:K02305", "ko:K00376") 
+
+DN_KO_rel <- KO_rel |> filter(`function` %in% KO_IDs)
+DN_KO_rel <- DN_KO_rel |>
+  mutate(`function` = factor(`function`, levels = KO_IDs))
+
+# separating rel df by HRT
+DN_KO_rel_4 <- DN_KO_rel |> filter(HRT == "4")
+DN_KO_rel_8 <- DN_KO_rel |> filter(HRT == "8")
+DN_KO_rel_16 <- DN_KO_rel |> filter(HRT == "16")
+
+# custom stats annotations
+plot_comps <- list(c("CC", "WC"))
+
+# custom strips
+KO_strip_text_labs <- c(
+           "ko:K00370" = "K00370 (narG)", 
+           "ko:K00374" = "K00374 (narI)", 
+           "ko:K02567" = "K02567 (napA)", 
+           "ko:K02568" = "K02568 (napB)", 
+           "ko:K00368" = "K00368 (nirK)", 
+           "ko:K15864" = "K15864 (nirS)", 
+           "ko:K04561" = "K04561 (norB)", 
+           "ko:K02305" = "K02305 (norC)", 
+           "ko:K00376" = "K00376 (nosZ)"
+           )
+
+KO_strip_text_cols <- c(
+  "K00370 (narG)" = "grey60", 
+  "K00374 (narI)" = "grey60", 
+  "K02567 (napA)" = "grey60", 
+  "K02568 (napB)" = "grey60", 
+  "K00368 (nirK)" = "grey80", 
+  "K15864 (nirS)" = "grey80", 
+  "K04561 (norB)" = "#aca193", 
+  "K02305 (norC)" = "#aca193", 
+  "K00376 (nosZ)" = "grey90"
+)
+
+strip <- strip_themed(
+  text_x = elem_list_text(
+    colour = "black"
+  ),
+  background_x = elem_list_rect(
+    fill = KO_strip_text_cols
+  )
+)
+
+# custom legend
+steps <- c("NO3->NO2", "NO2->NO", "NO->N2O", "N2O->N2")
+
+reduction_colors <- c(
+  "NO3->NO2" = "grey60",
+  "NO2->NO"  = "grey80",
+  "NO->N2O"  = "#aca193",
+  "N2O->N2"  = "grey90"
+)
+
+reduction_labels <- c(
+  "NO3->NO2" = expression(NO[3]^'-' ~ "\u2192" ~ NO[2]^'-'),
+  "NO2->NO"  = expression(NO[2]^'-' ~ "\u2192" ~ NO),
+  "NO->N2O"  = expression(NO ~ "\u2192" ~ N[2]*O),
+  "N2O->N2"  = expression(N[2]*O ~ "\u2192" ~ N[2])
+)
+
+legend_df <- data.frame(Step = factor(steps, levels = steps), y = seq_along(steps))
+```
+
+*FINAL MAIN: Figure 5*
+```{r, fig.width=8, fig.height=10}
+# stats
+stat_test <- DN_KO_rel_16 %>%
+  group_by(`function`) %>%
+  wilcox_test(RelAbund ~ SampleType) %>%
+  adjust_pvalue(method = "bonferroni") %>%
+  add_xy_position(x = "SampleType")
+
+stat_test <- stat_test %>% filter(p.adj < 0.05)
+
+stat_test <- stat_test |>
+  mutate(y.position = 0.00028)
+
+stat_test$symbol <- "***"
+
+# legend plot
+legend_plot <- ggplot(legend_df, aes(x = 1, y = Step, fill = Step)) +
+  geom_tile(color = "black", width = 0.4, height = 0.9) +
+  scale_fill_manual(
+    values = reduction_colors,
+    labels = reduction_labels,
+    name = "Denitrification Step"
+  ) +
+  theme_void() +
+  theme(
+    legend.title = element_text(face = "bold"),
+    legend.text = element_text(size = 13),
+    legend.key.size = unit(0.8, "cm")
+  )
+
+legend_grob <- cowplot::get_legend(legend_plot)
+
+# plot -------------------------------------------------------------------------------------------------------------------
+fig5 <- DN_KO_rel_16 |>
+  ggplot(aes(x = SampleType, y = RelAbund, fill = SampleType)) +
+  geom_boxplot() +
+  facet_wrap2(~ `function`, 
+             labeller = as_labeller(KO_strip_text_labs),
+             strip = strip) +
+  theme_classic() +
+  labs(
+ #   title = "Rel Abund of denitrification KO - 16HRT",
+    x = "Sample Type",
+    y = "Relative Abundance"
+  ) +
+  scale_fill_manual(values = c(CC = "#ffa52d", WC = "darkseagreen"), name = "Media Type") +
+  stat_pvalue_manual(
+    stat_test,
+    label = "symbol",
+    tip.length = 0.01,
+    hide.ns = TRUE # or FALSE to show all
+  ) +
+  theme(
+    strip.text = element_text(size = 14),
+    axis.text.x = element_text(size = 12),
+    axis.title.x = element_blank(),
+    legend.text = element_text(size = 15),
+    legend.position = "bottom",
+    legend.title = element_text(size = 15)
+  )
+
+# plot w/ extra legend
+fig5_final <- fig5 + patchwork::wrap_elements(legend_grob) +
+  plot_layout(ncol = 2, widths = c(10, 3))
+
+#ggsave("../raw_figs_301/dnbr_fig5_picrust2.png", plot = fig5_final, width = 9, height = 10, units = "in", dpi = 300)
+```
+
+*NSTI plot - extra - not saved*
+```{r}
+nsti_317 <- read_tsv("../data/picrust2/marker_predicted_and_nsti_317.tsv")
+
+# 317 bar plot
+nsti_317 |>
+  ggplot(aes(x = sequence, y = metadata_NSTI)) +
+  geom_bar(stat = "identity") +
+  theme_classic() +
+  labs(title = "NSTI Scores of 317 se-ASVs", x = "Each bar = Unique se-ASV (317)", y = "NSTI score") +
+  scale_y_continuous(breaks = c(0.5, 1, 2), labels = c("good (0.5)", "moderate (1)", "bad (2)")) +
+  theme(axis.text.x = element_blank()) +
+  geom_hline(aes(yintercept = 0.5), color = "#808080", linetype = "dashed", size = 0.75) +
+  geom_hline(aes(yintercept = 1), color = "#808080", linetype = "dashed", size = 0.75) +
+  geom_hline(aes(yintercept = 2), color = "#cc3700", linetype = "dashed", size = 0.75) 
+```
+
+*Figure S6 A - 4-h HRT*
+```{r, fig.width=8, fig.height=10}
+# stats
+stat_test <- DN_KO_rel_4 %>%
+  group_by(`function`) %>%
+  wilcox_test(RelAbund ~ SampleType) %>%
+  adjust_pvalue(method = "bonferroni") %>%
+  add_xy_position(x = "SampleType")
+
+stat_test <- stat_test %>% filter(p.adj < 0.05)
+
+stat_test <- stat_test |>
+  mutate(y.position = 0.00028)
+
+stat_test$symbol <- "***"
+
+# legend plot
+legend_plot <- ggplot(legend_df, aes(x = 1, y = Step, fill = Step)) +
+  geom_tile(color = "black", width = 0.4, height = 0.9) +
+  scale_fill_manual(
+    values = reduction_colors,
+    labels = reduction_labels,
+    name = "Denitrification Step"
+  ) +
+  theme_void() +
+  theme(
+    legend.title = element_text(face = "bold"),
+    legend.text = element_text(size = 13),
+    legend.key.size = unit(0.8, "cm")
+  )
+
+legend_grob <- cowplot::get_legend(legend_plot)
+
+# plot
+sfig6a <- DN_KO_rel_4 |>
+  ggplot(aes(x = SampleType, y = RelAbund, fill = SampleType)) +
+  geom_boxplot() +
+  facet_wrap2(~ `function`, 
+             labeller = as_labeller(KO_strip_text_labs),
+             strip = strip) +
+  theme_classic() +
+  labs(
+    title = "4-h HRT",
+    x = "Media Type",
+    y = "Relative Abundance"
+  ) +
+  scale_fill_manual(values = c(CC = "#ffa52d", WC = "darkseagreen"), name = "Media Type") +
+  stat_pvalue_manual(
+    stat_test,
+    label = "symbol",
+    tip.length = 0.01,
+    hide.ns = TRUE # or FALSE to show all
+  ) +
+  theme(
+    strip.text = element_text(size = 14),
+    axis.text.x = element_text(size = 12),
+    axis.title.x = element_blank(),
+    legend.text = element_text(size = 15),
+    legend.position = "bottom",
+    title = element_text(size = 15)
+  )
+```
+
+*Figure S6 B - 8-h HRT*
+```{r, fig.width=6, fig.height=10}
+# stats
+stat_test <- DN_KO_rel_8 %>%
+  group_by(`function`) %>%
+  wilcox_test(RelAbund ~ SampleType) %>%
+  adjust_pvalue(method = "bonferroni") %>%
+  add_xy_position(x = "SampleType")
+
+stat_test <- stat_test %>% filter(p.adj < 0.05)
+
+stat_test <- stat_test |>
+  mutate(y.position = 0.00028)
+
+stat_test$symbol <- "***"
+
+# legend plot
+legend_plot <- ggplot(legend_df, aes(x = 1, y = Step, fill = Step)) +
+  geom_tile(color = "black", width = 0.4, height = 0.9) +
+  scale_fill_manual(
+    values = reduction_colors,
+    labels = reduction_labels,
+    name = "Denitrification Step"
+  ) +
+  theme_void() +
+  theme(
+    legend.title = element_text(face = "bold"),
+    legend.text = element_text(size = 13),
+    legend.key.size = unit(0.8, "cm")
+  )
+
+legend_grob <- cowplot::get_legend(legend_plot)
+
+# plot
+sfig6b <- DN_KO_rel_8 |>
+  ggplot(aes(x = SampleType, y = RelAbund, fill = SampleType)) +
+  geom_boxplot() +
+  facet_wrap2(~ `function`, 
+             labeller = as_labeller(KO_strip_text_labs),
+             strip = strip) +
+  theme_classic() +
+  labs(
+    title = "8-h HRT",
+    x = "Media Type",
+    y = "Relative Abundance"
+  ) +
+  scale_fill_manual(values = c(CC = "#ffa52d", WC = "darkseagreen"), name = "Media Type") +
+  stat_pvalue_manual(
+    stat_test,
+    label = "symbol",
+    tip.length = 0.01,
+    hide.ns = TRUE # or FALSE to show all
+  ) +
+  theme(
+    strip.text = element_text(size = 14),
+    axis.text.x = element_text(size = 12),
+    axis.title.x = element_blank(),
+    legend.text = element_text(size = 15),
+    legend.position = "bottom",
+    title = element_text(size = 15)
+  )
+```
+
+*FINAL SUPP: Figure S6*
+```{r, fig.width=14, fig.height=8}
+sfig6 <- sfig6a + plot_spacer() + sfig6b + plot_spacer() + patchwork::wrap_elements(legend_grob) +
+  plot_layout(ncol = 5, widths = c(5, 0.1, 5, 0.1, 2))
+
+sfig6
+
+#ggsave("../raw_figs_301/dnbr_sfig6_48_picrust2.png", plot = sfig6, width = 14, height = 8, units = "in", dpi = 300)
+```
+
+*################################################################################################################*
+*################################################################################################################*
+#-----------------------------------------
+### 7) Alpha Diversity - (FigS3, Table S2)
+# Media samples only, all HRTs
+#-----------------------------------------
+
+*Prep*
+```{r}
+# calculate alpha diversity
+alpha_df <- estimate_richness(ps_media, measures = c("Shannon", "Chao1", "Simpson"))
+alpha_df$SampleID <- rownames(alpha_df)
+alpha_df$SampleID <- sub("^X", "", alpha_df$SampleID)
+
+# add sample info
+alpha_df$SampleType <- sapply(alpha_df$SampleID, extract_sample_type)
+alpha_df$Bioreactor <- sapply(alpha_df$SampleID, extract_bioreactor_id)
+alpha_df$HRT <- sapply(alpha_df$SampleID, extract_HRT)
+alpha_df$SampleSource <- sapply(alpha_df$SampleID, extract_sample_source)
+
+# converting cols to factors
+columns_to_factor <- c("SampleType", "HRT", "SampleSource", "Bioreactor")
+
+alpha_df <- alpha_df |>
+  mutate_at(vars(all_of(columns_to_factor)), ~ as.factor(as.character(.)))
+
+## ordering HRT
+HRT_order <- c("4", "8", "16")
+
+alpha_df <- alpha_df |>
+  mutate(HRT = factor(HRT, levels = HRT_order))
+
+# numeric means - alpha diversity by sample type & HRT
+alpha_df |>
+  group_by(SampleType, HRT) |>
+  summarise(mean_shannon = mean(Shannon, na.rm = TRUE),
+            shan_std = sd(Shannon, na.rm = TRUE),
+            mean_chao = mean(Chao1, na.rm = TRUE),
+            chao_std = sd(Chao1, na.rm = TRUE),
+            mean_simpson = mean(Simpson, na.rm = TRUE),
+            simpson_std = sd(Simpson, na.rm = TRUE))
+```
+
+*Figure S3 A-C & Stats*
+```{r, fig.width=4, fig.height=6}
+#----------------
+# Plot - Shannon
+#----------------
+sfig3a <- alpha_df |>
+ggplot(aes(x = Bioreactor, y = Shannon)) +
+  geom_boxplot(aes(fill = SampleType)) +
+#  geom_jitter(width = 0.2, size = 2, alpha = 0.4, aes(shape = SampleSource)) +
+  facet_wrap(~ HRT) +
+  labs(
+#    title = "Shannon Diversity of CC and WC bioreactors",
+    x = "Bioreactor", 
+    y = "Shannon Index") +
+  scale_fill_manual(
+    labels = c("corncob" = "CC", "woodchip" = "WC"),
+    values = c("corncob" = "#ffa52d", "woodchip" = "darkseagreen"),
+    name = "Media Type") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+    scale_shape_manual(values = c("media" = 5, "water" = 16)) +
+  theme_classic() +
+  theme(legend.position = "bottom",
+        strip.text = element_text(size = 13),
+        axis.text = element_text(size = 13), 
+        axis.title = element_text(size = 13),
+        legend.text = element_text(size = 13)) +
+  scale_x_discrete(labels = c("corncob" = "CC", 
+                              "woodchip" = "WC"))
+
+#----------------
+# Plot - Chao1
+#----------------
+sfig3b <- alpha_df |>
+ggplot(aes(x = Bioreactor, y = Chao1)) +
+  geom_boxplot(aes(fill = SampleType)) +
+#  geom_jitter(width = 0.2, size = 2, alpha = 0.4, aes(shape = SampleSource)) +
+  facet_wrap(~ HRT) +
+  labs(
+#    title = "Chao1 Diversity of CC and WC bioreactors",
+    x = "Bioreactor", 
+    y = "Chao1 Index") +
+  scale_fill_manual(
+    labels = c("corncob" = "CC", "woodchip" = "WC"),
+    values = c("corncob" = "#ffa52d", "woodchip" = "darkseagreen"),
+    name = "Media Type") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+    scale_shape_manual(values = c("media" = 5, "water" = 16)) +
+  theme_classic() +
+  theme(legend.position = "bottom",
+        strip.text = element_text(size = 13),
+        axis.text = element_text(size = 13), 
+        axis.title = element_text(size = 13),
+        legend.text = element_text(size = 13)) +
+  scale_x_discrete(labels = c("corncob" = "CC", 
+                              "woodchip" = "WC"))
+
+#----------------
+# Plot - Simpson
+#----------------
+sfig3c <- alpha_df |>
+ggplot(aes(x = Bioreactor, y = Simpson)) +
+  geom_boxplot(aes(fill = SampleType)) +
+#  geom_jitter(width = 0.2, size = 2, alpha = 0.4, aes(shape = SampleSource)) +
+  facet_wrap(~ HRT) +
+  labs(
+#    title = "Simpson Diversity of CC and WC bioreactors",
+    x = "Bioreactor", 
+    y = "Simpson Index") +
+  scale_fill_manual(
+    labels = c("corncob" = "CC", "woodchip" = "WC"),
+    values = c("corncob" = "#ffa52d", "woodchip" = "darkseagreen"),
+    name = "Media Type") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+    scale_shape_manual(values = c("media" = 5, "water" = 16)) +
+  theme_classic() +
+  theme(legend.position = "bottom",
+        strip.text = element_text(size = 13),
+        axis.text = element_text(size = 13), 
+        axis.title = element_text(size = 13),
+        legend.text = element_text(size = 13)) +
+  scale_x_discrete(labels = c("corncob" = "CC", 
+                              "woodchip" = "WC"))
+```
+```{r}
+#-----------------
+# Stats - Shannon 
+#-----------------
+alpha_df |>
+  group_by(HRT) |>
+  kruskal_test(Shannon ~ SampleType)
+
+# Post Hoc 
+dunn_alpha_shan <- alpha_df |>
+  group_by(HRT) |>
+  dunn_test(Shannon ~ Bioreactor, p.adjust.method = "bonferroni")
+
+dunn_alpha_shan_sig <- dunn_alpha_shan |>
+  filter(p.adj.signif != "ns")
+
+#-----------------
+# Stats - Chao1 
+#-----------------
+alpha_df |>
+  group_by(HRT) |>
+  kruskal_test(Chao1 ~ SampleType) 
+
+# Post Hoc 
+dunn_alpha_chao <- alpha_df |>
+  group_by(HRT) |>
+  dunn_test(Chao1 ~ Bioreactor, p.adjust.method = "bonferroni")
+
+dunn_alpha_chao_sig <- dunn_alpha_chao |>
+  filter(p.adj.signif != "ns")
+
+#-----------------
+# Stats - Simpson 
+#-----------------
+
+# Stats for sample type 
+alpha_df |>
+  group_by(HRT) |>
+  kruskal_test(Simpson ~ SampleType) 
+
+# Post Hoc 
+dunn_alpha_simpson <- alpha_df |>
+  group_by(HRT) |>
+  dunn_test(Simpson ~ Bioreactor, p.adjust.method = "bonferroni")
+
+dunn_alpha_simpson_sig <- dunn_alpha_simpson |>
+  filter(p.adj.signif != "ns")
+```
+
+*FINAL SUPP: Figure S3*
+```{r, fig.width=30, fig.height=10}}
+sfig3 <- sfig3a + plot_spacer() + sfig3b + plot_spacer() + sfig3c +
+  plot_layout(widths = c(2, 0.1, 2, 0.1, 2), ncol = 5) 
+
+# save plot
+#ggsave("../raw_figs_301/dnbr_sfig3_alpha.png", plot = sfig3, width = 10, height = 6, units = "in", dpi = 300)
+```
+
+*Rarefied Analysis - media only - not saved*
+```{r}
+# calculate alpha diversity - ps_m_rare in 2) NMDS rarefied analysis section
+alpha_df <- estimate_richness(ps_m_rare, measures = c("Shannon", "Chao1", "Simpson"))
+alpha_df$SampleID <- rownames(alpha_df)
+alpha_df$SampleID <- sub("^X", "", alpha_df$SampleID)
+
+# add sample info
+alpha_df$SampleType <- sapply(alpha_df$SampleID, extract_sample_type)
+alpha_df$Bioreactor <- sapply(alpha_df$SampleID, extract_bioreactor_id)
+alpha_df$HRT <- sapply(alpha_df$SampleID, extract_HRT)
+alpha_df$SampleSource <- sapply(alpha_df$SampleID, extract_sample_source)
+
+# converting cols to factors
+columns_to_factor <- c("SampleType", "HRT", "SampleSource", "Bioreactor")
+
+alpha_df <- alpha_df |>
+  mutate_at(vars(all_of(columns_to_factor)), ~ as.factor(as.character(.)))
+
+## ordering HRT
+HRT_order <- c("4", "8", "16")
+
+alpha_df <- alpha_df |>
+  mutate(HRT = factor(HRT, levels = HRT_order))
+```
+```{r, fig.width=4, fig.height=6}
+#----------------
+# Plot - Shannon
+#----------------
+alpha_df |>
+ggplot(aes(x = Bioreactor, y = Shannon)) +
+  geom_boxplot(aes(fill = SampleType)) +
+#  geom_jitter(width = 0.2, size = 2, alpha = 0.4, aes(shape = SampleSource)) +
+  facet_wrap(~ HRT) +
+  labs(
+#    title = "Shannon Diversity of CC and WC bioreactors",
+    x = "Bioreactor", 
+    y = "Shannon Index") +
+  scale_fill_manual(
+    values = c("corncob" = "#ffa52d", "woodchip" = "darkseagreen"),
+    name = "Sample Type") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+    scale_shape_manual(values = c("media" = 5, "water" = 16)) +
+  theme_classic() +
+  theme(legend.position = "bottom",
+        strip.text = element_text(size = 15),
+        axis.text = element_text(size = 15), 
+        axis.title = element_text(size = 15),
+        legend.text = element_text(size = 15))
+
+#----------------
+# Plot - Chao1
+#----------------
+alpha_df |>
+ggplot(aes(x = Bioreactor, y = Chao1)) +
+  geom_boxplot(aes(fill = SampleType)) +
+#  geom_jitter(width = 0.2, size = 2, alpha = 0.4, aes(shape = SampleSource)) +
+  facet_wrap(~ HRT) +
+  labs(
+#    title = "Chao1 Diversity of CC and WC bioreactors",
+    x = "Bioreactor", 
+    y = "Chao1 Index") +
+  scale_fill_manual(
+    values = c("corncob" = "#ffa52d", "woodchip" = "darkseagreen"),
+    name = "Sample Type") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+    scale_shape_manual(values = c("media" = 5, "water" = 16)) +
+  theme_classic() +
+  theme(legend.position = "bottom",
+        strip.text = element_text(size = 15),
+        axis.text = element_text(size = 15), 
+        axis.title = element_text(size = 15),
+        legend.text = element_text(size = 15))
+
+#----------------
+# Plot - Simpson
+#----------------
+alpha_df |>
+ggplot(aes(x = Bioreactor, y = Simpson)) +
+  geom_boxplot(aes(fill = SampleType)) +
+#  geom_jitter(width = 0.2, size = 2, alpha = 0.4, aes(shape = SampleSource)) +
+  facet_wrap(~ HRT) +
+  labs(
+#    title = "Simpson Diversity of CC and WC bioreactors",
+    x = "Bioreactor", 
+    y = "Simpson Index") +
+  scale_fill_manual(
+    values = c("corncob" = "#ffa52d", "woodchip" = "darkseagreen"),
+    name = "Sample Type") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+    scale_shape_manual(values = c("media" = 5, "water" = 16)) +
+  theme_classic() +
+  theme(legend.position = "bottom",
+        strip.text = element_text(size = 15),
+        axis.text = element_text(size = 15), 
+        axis.title = element_text(size = 15),
+        legend.text = element_text(size = 15))
+```
+
+*################################################################################################################*
+*################################################################################################################*
+#-------------------------------------------
+### 8) Taxonomy 
+# 317 se-ASVs, media samples only, all HRTs
+#-------------------------------------------
+
+#---------------- HEATMAP ----------------
+
+*CC & WC 317 se-asv Phyla by triplicate ID*
+```{r, fig.height=6, fig.width=12}
+ps_media_rel_df <- ps_media |>
+  psmelt() |>
+  as_tibble() |>
+  filter(!is.na(Phylum), Phylum != "NA")
+
+# making a triplicate column
+ps_media_rel_df$triplicate_id <- str_replace(ps_media_rel_df$SampleID, "_\\d+_(\\d+)", "_\\1")
+
+ps_media_rel_df <- ps_media_rel_df |>
+  group_by(triplicate_id) |>
+  mutate(relative_abund = Abundance / sum(Abundance, na.rm = TRUE)) |> 
+  ungroup()
+
+# assigning core vs other grouping <- all 317, not split by media-specific se-ASV
+ps_media_rel_df$Phylum_ID <- ifelse(
+  ps_media_rel_df$OTU %in% se_asv_317, 
+  as.character(ps_media_rel_df$Phylum), 
+  "Other"
+)
+
+ps_media_heat_df <- ps_media_rel_df |>
+  group_by(
+    SampleType,
+    HRT,
+    triplicate_id,
+    Phylum_ID
+  ) |>
+  dplyr::summarise(
+    rel_abund = sum(relative_abund, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+phyla_factor_order <- c("Proteobacteria", "Actinobacteriota", "Cyanobacteria", "Euryarchaeota", "Bacteroidota", "Acidobacteriota", "Desulfobacterota", "Planctomycetota",
+                        "Myxococcota", "Verrucomicrobiota", "Firmicutes", "Chloroflexi", "Halobacterota", "Thermoplasmatota", "Patescibacteria", "Spirochaetota", 
+                        "Armatimonadota", "Bdellovibrionota", "Gemmatimonadota", "Other")
+
+ps_media_heat_df$Phylum_ID <- factor(
+  ps_media_heat_df$Phylum_ID, 
+  levels = rev(phyla_factor_order))
+
+# bin relative abundance for plot
+ps_media_heat_df <- ps_media_heat_df %>%
+  mutate(
+    rel_abund_bin = cut(
+      rel_abund,
+      breaks = c(0, 0.1, 0.2, 0.4, 0.6, 0.8, 1),
+      include.lowest = TRUE,
+      right = FALSE,
+      labels = c(
+        "0–0.1",
+        "0.1–0.2",
+        "0.2–0.4",
+        "0.4–0.6",
+        "0.6–0.8",
+        "0.8–1"
+      )
+    )
+  )
+
+# bin color map
+heatmap_colors <- c(
+  "0–0.1"   = "#E0E9FF",
+  "0.1–0.2" = "#ADC6FE",
+  "0.2–0.4" = "#759FFD",
+  "0.4–0.6" = "#2366FC",
+  "0.6–0.8" = "#02329D",
+  "0.8–1"   = "#011C58"
+)
+
+ps_media_heat_df <- ps_media_heat_df %>%
+  mutate(
+    rel_abund_bin = ifelse(
+      rel_abund == 0,
+      "0",
+      as.character(rel_abund_bin)
+    ),
+    rel_abund_bin = factor(
+      rel_abund_bin,
+      levels = c("0", names(heatmap_colors))
+    )
+  )
+
+heatmap_colors <- c(
+  "0"       = "white",
+  heatmap_colors
+)
+
+
+# optional: drop "other"
+# ps_media_heat_df <- ps_media_heat_df |>
+#   filter(Phylum_ID != "Other")
+
+# ordering triplicates
+unique(ps_media_heat_df$triplicate_id)
+
+triplicate_order <- c("4CC_0", "4CC_4", "4CC_7","4CC_11", "4CC_14", "4CC_18", "4CC_21",  
+                      "CC_6", "CC_10", "CC_15", "CC_20",  
+                      "CC_21", "CC_28", "CC_29", "CC_30", "CC_31", "CC_32", "CC_33", "CC_34", "CC_35", "CC_36", "CC_37", "CC_38", 
+                      "4WC_0", "4WC_4", "4WC_8", "4WC_11", "4WC_14", "4WC_18", "4WC_21",  
+                      "WC_6", "WC_10", "WC_15", "WC_20", 
+                      "WC_21", "WC_24", "WC_27", "WC_28", "WC_29", "WC_30", "WC_31")
+
+ps_media_heat_df$triplicate_id <- factor(ps_media_heat_df$triplicate_id, levels = triplicate_order)
+
+new_phyla_taxa_names <- c(
+  "Proteobacteria" = "Pseudomonadota", 
+  "Actinobacteriota" = "Actinomycetota",
+  "Cyanobacteria" = "Cyanobacteria",
+  "Euryarchaeota" = "Euryarchaeota",
+  "Bacteroidota" = "Bacteroidota",
+  "Acidobacteriota" = "Acidobacteriota",
+  "Desulfobacterota" = "Desulfobacterota",
+  "Planctomycetota" = "Planctomycetota",
+  "Myxococcota" = "Myxococcota",
+  "Verrucomicrobiota" = "Verrucomicrobiota",
+  "Firmicutes" = "Bacillota",
+  "Chloroflexi" = "Chloroflexota",
+  "Halobacterota" = "Halobacterota",
+  "Thermoplasmatota" = "Thermoplasmatota",
+  "Patescibacteria" = "Patescibacteria",
+  "Spirochaetota" = "Spirochaetota",
+  "Armatimonadota" = "Armatimonadota",
+  "Bdellovibrionota" = "Bdellovibrionota",
+  "Gemmatimonadota" = "Gemmatimonadota",
+  "Other" = "Other"
+)
+
+# plot
+# ggplot(
+#   ps_media_heat_df,
+#   aes(
+#     x = triplicate_id,
+#     y = Phylum_ID,
+#     fill = rel_abund
+#   )
+# ) +
+#   geom_tile(color = "white", linewidth = 0.2) +
+#   facet_wrap(~ SampleType + HRT, scales = "free_x", nrow = 1) +
+#   scale_fill_gradient(
+#     name = "Relative abundance",
+#     low = "white",
+#     high = "#1F77B4"
+#   ) +
+#   labs(
+#     x = "Triplicate",
+#     y = "Phylum"
+#   ) +
+#   theme_bw() +
+#   theme(
+#     panel.grid = element_blank(),
+#     axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+#     axis.text = element_text(size = 12),
+#     strip.text = element_text(size = 14),
+#     axis.title = element_text(size = 14),
+#     legend.title = element_text(size = 13),
+#     legend.text = element_text(size = 11)
+#   )
+
+phyla_heatmap <- ggplot(
+  ps_media_heat_df,
+  aes(
+    x = triplicate_id,
+    y = Phylum_ID,
+    fill = rel_abund_bin
+  )
+) +
+  geom_tile(color = "white", linewidth = 0.2) +
+  facet_wrap(~ SampleType + HRT, scales = "free_x", nrow = 1) +
+  scale_fill_manual(
+    name = "Relative abundance",
+    values = heatmap_colors,
+    drop = FALSE
+  ) +
+  scale_y_discrete(labels = new_phyla_taxa_names) +
+  labs(
+    x = "Triplicate",
+    y = "Phylum"
+  ) +
+  theme_bw() +
+  theme(
+    panel.grid = element_blank(),
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+    axis.text = element_text(size = 12),
+    strip.text = element_text(size = 14),
+    axis.title = element_text(size = 14),
+    legend.title = element_text(size = 13),
+    legend.text = element_text(size = 11)
+  )
+
+#ggsave("../raw_figs_301/phyla_317_heatmap.png", plot = phyla_heatmap, width = 14, height = 6, units = "in", dpi = 300)
+
+# numeric means - Phyla relative abundance by sample type & HRT
+ps_media_phyla_means <- ps_media_heat_df |>
+  group_by(SampleType, HRT, Phylum_ID) |>
+  summarise(mean_rel = mean(rel_abund, na.rm = TRUE),
+            mean_rel_std = sd(rel_abund, na.rm = TRUE))
+```
+
+*CC & WC 317 se-asv Genera by triplicate ID*
+```{r, fig.height=8, fig.width=12}
+ps_media_rel_df <- ps_media |>
+  psmelt() |>
+  as_tibble() |>
+  filter(!is.na(Genus), Genus != "NA")
+
+# making a triplicate column
+ps_media_rel_df$triplicate_id <- str_replace(ps_media_rel_df$SampleID, "_\\d+_(\\d+)", "_\\1")
+
+ps_media_rel_df <- ps_media_rel_df |>
+  group_by(triplicate_id) |>
+  dplyr::mutate(relative_abund = Abundance / sum(Abundance, na.rm = TRUE)) |> 
+  ungroup()
+
+# assigning core vs other grouping <- all 317, not split by media-specific se-ASV
+ps_media_rel_df$Genus_ID <- ifelse(
+  ps_media_rel_df$OTU %in% se_asv_317, 
+  as.character(ps_media_rel_df$Genus), 
+  "Other"
+)
+
+ps_media_heat_df <- ps_media_rel_df |>
+  group_by(
+    SampleType,
+    HRT,
+    triplicate_id,
+    Genus_ID
+  ) |>
+  dplyr::summarise(
+    rel_abund = sum(relative_abund, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# bin relative abundance for plot
+ps_media_heat_df <- ps_media_heat_df %>%
+  dplyr::mutate(
+    rel_abund_bin = cut(
+      rel_abund,
+      breaks = c(0, 0.1, 0.2, 0.4, 0.6),
+      include.lowest = TRUE,
+      right = FALSE,
+      labels = c(
+        "0–0.1",
+        "0.1–0.2",
+        "0.2–0.4",
+        "0.4–0.6"
+      )
+    )
+  )
+
+# bin color map
+heatmap_colors <- c(
+  "0–0.1"   = "#E0E9FF",
+  "0.1–0.2" = "#ADC6FE",
+  "0.2–0.4" = "#759FFD",
+  "0.4–0.6" = "#2366FC"
+)
+
+ps_media_heat_df <- ps_media_heat_df %>%
+  dplyr::mutate(
+    rel_abund_bin = ifelse(
+      rel_abund == 0,
+      "0",
+      as.character(rel_abund_bin)
+    ),
+    rel_abund_bin = factor(
+      rel_abund_bin,
+      levels = c("0", names(heatmap_colors))
+    )
+  )
+
+heatmap_colors <- c(
+  "0"       = "white",
+  heatmap_colors
+)
+
+
+# optional: drop "other"
+# ps_media_heat_df <- ps_media_heat_df |>
+#   filter(Genus_ID != "Other")
+
+# order genera top → bottom (reverse for heatmap aesthetics)
+
+se_asv_genus_map <- c(
+  "Xanthobacter", "Pseudorhodoplanes", "Azotobacter", "Burkholderia-Caballeronia-Paraburkholderia", "Cellulomonas", "Azospira", "Zoogloea", "Pseudomonas", "Plot4-2H12", 
+  "Methanobacterium", "Mycobacterium", "Bradyrhizobium", "Nevskia", "Sphingomonas", "Geothrix", "Desulfovibrio", "Mesorhizobium", "Rhizomicrobium", "Caulobacter", 
+  "Pleomorphomonas", "Coxiella", "Sediminibacterium", "Pajaroellobacter", "Undibacterium", "Edaphobaculum", "Pseudolabrys", "Kaistia", "Hyphomicrobium", "Rudaea", "Devosia", 
+  "Aetherobacter", "Prosthecobacter", "Beijerinckia", "Puia", "Novosphingobium", "Dyella", "LD29", "Anaerolineaceae UCG-001", "Bacteroides", "Papillibacter", "Sphingobium", 
+  "Gluconacetobacter", "Tahibacter", "Gemmata", "Rhodopila", "Ferruginibacter", "Thermincola", "WCHB1-32", "Limnohabitans",
+  
+  "Telmatospirillum", "Afipia", "Cytophaga", "Methylophilus", "Taibaiella", 
+  "Methanocella", "Pir2 lineage", "Ellin516", "Bryobacter", 
+  "Methanomassiliicoccus", "Methylocystis", "Bacillus", "Cupriavidus", 
+  "Methanosarcina", "Chitinophaga", "Altererythrobacter", "Leptolinea", 
+  "Terrimicrobium", "SN8", "Heliimonas", "Aquisphaera", "Paludisphaera", 
+  "Fimbriiglobus", "Microvirgula", "Opitutus", "Chthoniobacter", 
+  "Aquicella", "Ruminiclostridium", "Pseudoxanthobacter", "Terrimonas", 
+  "Anaerospora", "Fibrisoma", "Thiobacillus", "Curvibacter", 
+  "Pedomicrobium", "Solimonas", "Magnetospirillum", "Aminobacter", 
+  "Desulfosporosinus", "Streptomyces", "Parachlamydia", 
+  "Clostridium sensu stricto 1", "SM1A02", "NK4A214 group", "Ellin6055", 
+  "Incertae Sedis", "Sphingoaurantiacus", "Singulisphaera", "Haliangium", 
+  "Christensenellaceae R-7 group", "SH3-11", "Anaeromyxobacter", 
+  "Allorhizobium-Neorhizobium-Pararhizobium-Rhizobium", "Rhodoplanes", 
+  "Clostridium sensu stricto 12", "Labrys", "Azospirillum", "Inquilinus", 
+  "Steroidobacter", "Gordonia", "Thermomonas", "Nordella", "Rhodovastum", 
+  "Psychrobacter", "Mucilaginibacter", "Galbitalea", "Methanospirillum", 
+  "Acidibacter", "Sporobacter", "Williamsia", "Lacunisphaera", 
+  "Defluviitaleaceae UCG-011", "Reyranella", "Bdellovibrio", "Anaerolinea", 
+  "Spirosoma", "Gemmatimonas", "Methylobacterium-Methylorubrum", 
+  "Sporomusa", "Brevundimonas", "Tundrisphaera", "Pseudobacteroides", 
+  "Spirochaeta 2",
+  
+  "Other"
+)
+
+ps_media_heat_df$Genus_ID <- factor(
+  ps_media_heat_df$Genus_ID,
+  levels = rev(se_asv_genus_map))
+
+
+# ordering triplicates
+unique(ps_media_heat_df$triplicate_id)
+
+triplicate_order <- c("4CC_0", "4CC_4", "4CC_7","4CC_11", "4CC_14", "4CC_18", "4CC_21",  
+                      "CC_6", "CC_10", "CC_15", "CC_20",  
+                      "CC_21", "CC_28", "CC_29", "CC_30", "CC_31", "CC_32", "CC_33", "CC_34", "CC_35", "CC_36", "CC_37", "CC_38", 
+                      "4WC_0", "4WC_4", "4WC_8", "4WC_11", "4WC_14", "4WC_18", "4WC_21",  
+                      "WC_6", "WC_10", "WC_15", "WC_20", 
+                      "WC_21", "WC_24", "WC_27", "WC_28", "WC_29", "WC_30", "WC_31")
+
+ps_media_heat_df$triplicate_id <- factor(ps_media_heat_df$triplicate_id, levels = triplicate_order)
+
+genera_heatmap <- ggplot(
+  ps_media_heat_df,
+  aes(
+    x = triplicate_id,
+    y = Genus_ID,
+    fill = rel_abund_bin
+  )
+) +
+  geom_tile(color = "white", linewidth = 0.2) +
+  facet_wrap(~ SampleType + HRT, scales = "free_x", nrow = 1) +
+  scale_fill_manual(
+    name = "Relative abundance",
+    values = heatmap_colors,
+    drop = FALSE
+  ) +
+  labs(
+    x = "Triplicate",
+    y = "Genus"
+  ) +
+  theme_bw() +
+  theme(
+    panel.grid = element_blank(),
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 10),
+    axis.text.y = element_text(size = 6),
+    strip.text = element_text(size = 14),
+    axis.title = element_text(size = 14),
+    legend.title = element_text(size = 13),
+    legend.text = element_text(size = 11)
+  )
+
+#ggsave("../raw_figs_301/genera_317_heatmap.png", plot = genera_heatmap, width = 20, height = 13, units = "in", dpi = 300)
+```

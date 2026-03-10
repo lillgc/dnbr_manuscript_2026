@@ -1,0 +1,302 @@
+---
+title: "816_pso_prep"
+output: html_document
+date: "2025-10-08"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+*Library*
+```{r}
+library(BiocManager)      #BiocManager_1.30.26
+library(tidyverse)        #tidyverse_2.0.0 
+library(phyloseq)         #phyloseq_1.52.0
+library(Biostrings)       #Biostrings_2.76.0
+library(dada2)            #dada2_1.36.0 
+library(ShortRead)        #ShortRead_1.66.0 
+```
+```
+BiocManager::install(version = "3.21")
+BiocManager::install("ShortRead")
+BiocManager::install("dada2")
+```
+
+*Reading in all sample metadata & filtering*
+```{r}
+sample_metadata <- read_table("../data/microbial/pso_prep/250211_Taylor_Vroman_Howe_MF_16S_250210.txt")
+sample_metadata$SampleID <- gsub("-", "_", sample_metadata$SampleID) # change - to _
+```
+```
+TV_samples <- TV_samples %>%
+  mutate(sampleType = case_when(
+    Plate == 1 ~ "Water",
+    Plate == 2 ~ "Media",
+    TRUE ~ NA_character_  # assigns NA to other cases if needed
+  ))
+```
+
+*Working Directory & Saving Files*
+```{r}
+path16S <- "../data/fastq_816HRT_16S"
+list.files(path16S) # includes ___ forward & backward seqs (___ total)
+```
+
+*Renaming Files*
+```{r}
+fnF <- sort(list.files(path16S, pattern = "R1_001.fastq.gz", full.names = TRUE))
+fnR <- sort(list.files(path16S, pattern = "R2_001.fastq.gz", full.names = TRUE))
+
+print(fnF) # .fastq.gz files
+print(fnR) # .fastq.gz files
+
+# extract sample names, assuming filenames have format: SAMPLENAME_XXX.fastq
+sample.names16S <- sapply(strsplit(basename(fnF), "_"), function(x) {
+  if (grepl("INF", x[1])) {
+    return(paste(x[1], sep = "_"))  # EX: "INF21"
+  } else {
+    return(paste(x[1], x[2], x[3], sep = "_"))  # EX: "CC_1_12W", "WC_4_2"
+  }
+})
+```
+```{r}
+print(sample.names16S) # "CC_1_11W", "INF20", "WC_4_13W", "CC_1_34"
+```
+
+*Inspecting Read Quality Profiles*
+```{r, cache=TRUE}
+# [1:2] displays the first and second forward read SRR files
+plotQualityProfile(fnF[1:2])
+
+# [1:2] displays the first and second reverse read SRR files
+plotQualityProfile(fnR[1:2])
+```
+
+*Place filtered files in filtered sub directory*
+```{r}
+filtFs <- file.path(path16S, "filtered_16S", paste0(sample.names16S, "_F_filt.fastq.gz"))
+filtRs <- file.path(path16S, "filtered_16S", paste0(sample.names16S, "_R_filt.fastq.gz"))
+names(filtFs) <- sample.names16S
+names(filtRs) <- sample.names16S
+```
+
+*Naming Checkpoint*
+```{r}
+print(fnF)
+print(fnR)
+```
+```{r}
+print(filtFs)
+print(filtRs)
+```
+```
+# potential troubleshooting step
+names(fnF) <- sample.names16S
+names(fnR) <- sample.names16S
+```
+
+*Filtering Reads* 
+```{r}
+reads16S <- filterAndTrim(fnF, filtFs, fnR, filtRs, truncLen = c(145,145),
+                     maxN = 0, maxEE = c(2,2), truncQ = 2, rm.phix = TRUE, compress = TRUE, multithread = TRUE)
+
+write.csv(reads16S, file = "../data/microbial/pso_prep/816_reads_out_16S.csv")
+```
+
+*Error Models (Forward & Reverse)*
+```{r}
+errF <- learnErrors(filtFs, multithread = TRUE)
+# 100105970 total bases in 690386 reads from 78 samples will be used for learning the error rates
+
+errR <- learnErrors(filtRs, multithread = TRUE)
+# 100105970 total bases in 690386 reads from 78 samples will be used for learning the error rates
+```
+
+*Visualizing estimated error rates*
+```{r}
+plotErrors(errF, nominalQ = TRUE)
+
+# the estimated error rates (black line) are a good fit to the observed rates (points), and the error rates drop with increased quality as expected. Everything looks reasonable and we proceed with confidence.
+```
+
+*Apply the core sample inference algorithm to the filtered and trimmed sequence data*
+```{r}
+# forward
+dadaFs <- dada(filtFs, err=errF, multithread=TRUE)
+dadaFs[[1]]
+
+# reverse
+dadaRs <- dada(filtRs, err=errR, multithread=TRUE)
+dadaRs[[1]]
+```
+
+*Merge paired reads*
+```{r}
+# ensure dfs are all same lengths (YES: lengths are 113)
+length(filtFs)
+length(filtRs)
+length(dadaFs)
+length(dadaRs)
+
+# if the lengths did not match: run code below (will lose samples)
+#filtFs <- filtFs[names(dadaFs)]
+#filtRs <- filtRs[names(dadaRs)]
+
+mergers16S <- mergePairs(dadaFs, filtFs, dadaRs, filtRs, verbose=TRUE)
+```
+
+*Construct the sequence table out of merged pairs*
+```{r}
+seqtable16S <- makeSequenceTable(mergers16S)
+
+dim(seqtable16S)
+
+# inspect distribution of sequence lengths
+table(nchar(getSequences(seqtable16S)))
+
+# inspect distribution of sequence lengths
+dist_16Sseq_length <- table(nchar(getSequences(seqtable16S)))
+barplot(dist_16Sseq_length) 
+# since range is only 212 - 261, no additional filtering was done at this stage (highest around 253)
+```
+
+*Remove chimeras*
+```{r}
+seqtable16S.nochim <- removeBimeraDenovo(seqtable16S, method="consensus", multithread=TRUE, verbose=TRUE)
+
+dim(seqtable16S.nochim)
+# identified 138 bimeras out of 2507 input sequences.
+```
+
+*Track reads through the pipeline*
+```{r}
+getN <- function(x) sum(getUniques(x))
+track16S <- cbind(reads16S, sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(mergers16S, getN), rowSums(seqtable16S.nochim))
+
+colnames(track16S) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(track16S) <- sample.names16S
+head(track16S)
+```
+```{r}
+write.csv(track16S, file = "../data/microbial/pso_prep/TVsample_track16S.csv")
+```
+
+*Save seqtable.nochim*
+```{r}
+saveRDS(seqtable16S.nochim, file = "../data/microbial/pso_prep/816_seqtable_nochim_TV_16S.rds")
+```
+
+# -------------------------------------------------------------- HPC PORTION
+
+*Assign taxonomy*
+On home computer
+- upload `816_seqtable_nochim_TV_16S.rds` onto Nova on Demand 
+
+On HPC Nova on Demand R Studio Interactive Session
+> library(dada2)
+
+If not working, try: 
+> if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+BiocManager::install("dada2", version = "3.20")
+> library(dada2)
+
+After working: Note, must download appropriate taxa database and assign correct pathway
+> getwd()  # should be whereever you sent the .rds file to in HPC
+> seqtab_nochim <- readRDS("816_seqtable_nochim_TV_16S.rds")
+> taxa.ref <- "/work/adina/lilliang/assignTaxa/silva_nr99_v138.1_train_set.fa.gz"
+> taxa <- assignTaxonomy(seqtab_nochim, taxa.ref, multithread = TRUE, tryRC = TRUE)
+> taxa <- addSpecies(taxa, "/work/adina/lilliang/assignTaxa/silva_species_assignment_v138.1.fa.gz")
+
+> saveRDS(taxa, file = "taxa_TV_16S_816HRT.rds") 
+> quit()
+
+
+On HPC (outside of R)
+- download "taxa_TV_16S_4HRT.rds" to home computer 
+
+# --------------------------------------------------------------
+
+*Read-in "taxa.rds" file*
+```{r}
+getwd()
+file.exists("../data/microbial/pso_prep/taxa_TV_16S_816HRT.rds") #TRUE
+taxa16S <- readRDS("../data/microbial/pso_prep/taxa_TV_16S_816HRT.rds")
+
+taxa16S.print <- taxa16S # removing sequence rownames for display only
+rownames(taxa16S.print) <- NULL
+head(taxa16S.print)
+```
+
+*Construct sample data df*
+```{r}
+sample_metadata
+
+sample_metadata_full <- sample_metadata |> 
+  mutate(
+    SampleType = case_when(
+      grepl("^CC", SampleID) ~ "corncob",
+      grepl("^WC", SampleID) ~ "woodchip",
+      grepl("^INF", SampleID) ~ "influent",
+      TRUE ~ NA_character_
+    ),
+    
+    Bioreactor = case_when(
+      grepl("^CC_[0-9]+_", SampleID) ~ as.numeric(sub("CC_([0-9]+)_.*", "\\1", SampleID)),
+      grepl("^WC_[0-9]+_", SampleID) ~ as.numeric(sub("WC_([0-9]+)_.*", "\\1", SampleID)),
+      grepl("^INF", SampleID) ~ NA_real_,
+      TRUE ~ NA_real_
+    ),
+    
+    SampleMedia = case_when(
+      grepl("W$", SampleID) ~ "water",
+      grepl("^INF", SampleID) ~ "water",
+      TRUE ~ "media"
+    ),
+    
+     Week = as.numeric(
+      case_when(
+        grepl("^INF", SampleID) ~ sub("INF([0-9]+)$", "\\1", SampleID),  # For influent samples like INF31
+        TRUE ~ sub(".*_([0-9]+)(W?)$", "\\1", SampleID)  # For other samples
+      )
+    )
+  )
+```
+
+```{r}
+#sample name troubleshoot 
+seqtable16S.nochim <- readRDS("../data/microbial/pso_prep/816_seqtable_nochim_TV_16S.rds") 
+
+rownames(seqtable16S.nochim) <- sample.names16S
+filt_id <- rownames(seqtable16S.nochim)
+
+sample_table_filt <- sample_metadata_full |> filter(SampleID %in% filt_id)
+sample_table_filt <- as.data.frame(sample_table_filt)
+rownames(sample_table_filt) <- sample_table_filt$SampleID
+str(sample_table_filt)
+
+rownames(seqtable16S.nochim)
+rownames(sample_table_filt)
+```
+
+*Phyloseq object construction*
+```{r}
+ps16S <- phyloseq(otu_table(seqtable16S.nochim, taxa_are_rows=FALSE), 
+               sample_data(sample_table_filt), 
+               tax_table(taxa16S))
+```
+
+*Assign sequences to "ASV#" ID names*
+```{r}
+dna16S <- Biostrings::DNAStringSet(taxa_names(ps16S))
+names(dna16S) <- taxa_names(ps16S)
+ps16S <- merge_phyloseq(ps16S, dna16S)
+taxa_names(ps16S) <- paste0("ASV", seq(ntaxa(ps16S)))
+ps16S
+```
+
+*Save ps as a .rds*
+```{r}
+saveRDS(ps16S, file = "TV_16S_8_16_pso.rds")
+```

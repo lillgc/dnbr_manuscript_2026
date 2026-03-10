@@ -1,0 +1,365 @@
+---
+title: "4816_pso_prep2"
+output: html_document
+date: "2026-01-29"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+*Libraries*
+```{r}
+library(tidyverse)          #tidyverse_2.0.0
+library(phyloseq)           #phyloseq_1.52.0  
+library(dplyr)              #dplyr_1.1.4
+library(ggplot2)            #ggplot2_4.0.0 
+library(vegan)              #vegan_2.7-1
+
+library(ggpubr)             #ggpubr_0.6.1
+library(rstatix)            #rstatix_0.7.2 
+library(multcompView)       #multcompView_0.1-10
+library(pairwiseAdonis)     #pairwiseAdonis_0.4.1
+library(car)                #car_3.1-3 
+
+library(ggrepel)            #ggrepel_0.9.6
+```
+
+*PSO clean up functions*
+```{r}
+extract_sample_type <- function(id) {
+  id_no4 <- sub("^4", "", id) # remove leading '4' if present
+  
+  if (grepl("^CC", id_no4)) {
+    return("corncob")
+  } else if (grepl("^WC", id_no4)) {
+    return("woodchip")
+  } else if (grepl("^INF", id_no4)) {
+    return("influent")
+  } else {
+    return(NA)
+  }
+}
+
+extract_bioreactor_id <- function(id) {
+  # if INF sample, reactor ID is "0"
+  id_no4 <- sub("^4", "", id)
+  
+  if (grepl("^INF", id_no4)) {
+    return("0")
+  }
+  
+  # Match Bioreactor ID assuming format: CC_<bioreactorID>_<day> or WC_<bioreactorID>_<day>
+  matches <- regmatches(id_no4, regexec("^[A-Z]+_([0-9]+)_", id_no4))
+  
+  if (length(matches[[1]]) > 1) {
+    return(matches[[1]][2])
+  } else {
+    return(NA)
+  }
+}
+
+extract_HRT <- function(id) {
+  # 1. If starts with "4" → HRT = 4
+  if (grepl("^4", id)) {
+    return(4)
+  }
+  
+  if (grepl("^INF", id)) {
+    num <- as.numeric(sub("^INF(\\d+)$", "\\1", id))
+    if (!is.na(num)) {
+      if (num <= 20) return(8)
+      if (num >= 21) return(16)
+    }
+    return(NA)
+  }
+  
+  # 2. Extract last number before optional 'W'
+  day_str <- sub(".*_(\\d+)W?$", "\\1", id)  # pull numeric from end
+  day <- as.numeric(day_str)
+  
+  # 3. Apply rules for 8 vs 16 HRT
+  if (!is.na(day)) {
+    if (day >= 6 & day <= 20) {
+      return(8)
+    } else if (day >= 21) {
+      return(16)
+    }
+  }
+  
+  return(NA) # if it doesn't match pattern
+}
+
+extract_week <- function(id) {
+  # 1. If sample starts with "INF", extract Week number after "INF"
+  if (grepl("^INF", id)) {
+    Week_str <- sub("^INF(\\d+)W?$", "\\1", id)
+    Week <- as.numeric(Week_str)
+    return(Week)
+  }
+  # 2. For other sample IDs, extract last number (before optional W at the end)
+  Week_str <- sub(".*_(\\d+)W?$", "\\1", id)
+  Week <- as.numeric(Week_str)
+  if (!is.na(Week)) {
+    return(Week)
+  }
+  return(NA) # return NA if no match
+}
+```
+
+*PSO read-in & prep* - phyloseq objects were created from '4_pso_prep & 816_pso_prep' Rmds for respective HRTs & sequencing data runs
+```{r}
+#--------------------------
+# 4 HRT read-in & prep
+#--------------------------
+
+ps16S_4 <- readRDS("../data/microbial/TV_16S_4_pso.rds")
+
+# adding HRT
+sample_data(ps16S_4)$HRT <- 4
+ps16S_4_sample_df <- as.data.frame(sample_data(ps16S_4))
+
+# renaming SampleMedia to SampleSource
+names(ps16S_4_sample_df)[names(ps16S_4_sample_df) == "SampleMedia"] <- "SampleSource"
+
+# adjust data types
+ps16S_4_sample_df$HRT <- as.factor(ps16S_4_sample_df$HRT)
+ps16S_4_sample_df$Bioreactor <- as.factor(ps16S_4_sample_df$Bioreactor)
+ps16S_4_sample_df$SampleType <- as.factor(ps16S_4_sample_df$SampleType)
+ps16S_4_sample_df$Day <- as.numeric(as.character(ps16S_4_sample_df$Day))
+
+sample_data(ps16S_4) <- sample_data(ps16S_4_sample_df)
+
+#--------------------------
+# 8 & 16 HRT read-in & prep
+#--------------------------
+######################################################################################################## <- start of sample ID changes
+
+ps16S_816 <- readRDS("../data/microbial/TV_16S_8_16_pso.rds")
+
+# renaming sample IDs to correspond with actual week - matched ID to date collected through DNA_extraction.xlsx on CyBox
+ps16S_816_sample_df <- as.data.frame(sample_data(ps16S_816), stringsAsFactors = FALSE)
+
+sampleID_map <- data.frame(
+  old = c(
+    "CC_1_2", "CC_2_2", "CC_3_2",
+    "CC_1_3",	"CC_2_3", "CC_3_3",
+    "CC_1_4",	"CC_2_4", "CC_3_4",
+    "WC_4_2",	"WC_5_2", "WC_6_2",
+    "WC_4_3",	"WC_5_3", "WC_6_3",
+    "WC_4_4", "WC_5_4", "WC_6_4",
+    "INF23W"
+  ),
+  new = c(
+    "CC_1_6", "CC_2_6", "CC_3_6",
+    "CC_1_10", "CC_2_10", "CC_3_10",
+    "CC_1_15", "CC_2_15", "CC_3_15",
+    "WC_4_6",	"WC_5_6", "WC_6_6",
+    "WC_4_10", "WC_5_10", "WC_6_10", 
+    "WC_4_15", "WC_5_15", "WC_6_15",
+    "INF23")
+)
+
+# create vector with old names that need to be replaced and the replacement sample IDs
+lookup <- setNames(sampleID_map$new, sampleID_map$old)
+
+# original pso 8_16 sample IDs
+current <- sample_names(ps16S_816)
+
+# replace only where match exists
+sample_names(ps16S_816) <- ifelse(current %in% names(lookup),
+                                  lookup[current],
+                                  current)
+
+# check sample df
+ps16S_816_sample_df <- as.data.frame(sample_data(ps16S_816), stringsAsFactors = FALSE)
+
+# rownames to SampleID column
+ps16S_816_sample_df$SampleID <- rownames(ps16S_816_sample_df)
+
+# extract new weeks
+ps16S_816_sample_df$Week <- sapply(ps16S_816_sample_df$SampleID, extract_week)
+
+# adding back to pso
+sample_data(ps16S_816) <- sample_data(ps16S_816_sample_df)
+
+# check sample df
+ps16S_816_sample_df <- as.data.frame(sample_data(ps16S_816))
+
+
+######################################################################################################## <- end of sample ID changes
+
+# adding HRT
+sample_data(ps16S_816)$HRT <- ifelse(sample_data(ps16S_816)$Week <= 20, 8, 16)
+ps16S_816_sample_df <- as.data.frame(sample_data(ps16S_816))
+
+# renaming "SampleMedia" to "SampleSource"
+names(ps16S_816_sample_df)[names(ps16S_816_sample_df) == "SampleMedia"] <- "SampleSource"
+
+# adjust data types
+ps16S_816_sample_df$HRT <- as.factor(ps16S_816_sample_df$HRT)
+ps16S_816_sample_df$Bioreactor <- as.factor(ps16S_816_sample_df$Bioreactor)
+ps16S_816_sample_df$SampleType <- as.factor(ps16S_816_sample_df$SampleType)
+ps16S_816_sample_df$Week <- as.numeric(as.character(ps16S_816_sample_df$Week))
+
+sample_data(ps16S_816) <- sample_data(ps16S_816_sample_df)
+
+# check sample df
+ps16S_816_sample_df <- as.data.frame(sample_data(ps16S_816))
+```
+
+*Merging HRT psos*
+```{r}
+ps16S_all <- merge_phyloseq(ps16S_4, ps16S_816)
+
+# sample data frames
+ps16_sample_df <- as.data.frame(sample_data(ps16S_all))
+
+# saving file
+#saveRDS(ps16S_all, file = "../data/microbial/TV_16S_4816_pso.rds")
+```
+
+*Original Sample Size df*
+```{r}
+sample_size_df <- ps16_sample_df |>
+  group_by(SampleType, HRT, SampleSource) |>
+  summarise(n_samples = n(), .groups = "drop")
+
+print(sample_size_df)
+```
+
+*Look at Good, Clean Data - filtering low number of reads*
+```{r}
+sampling_coverage <- as.data.frame(sample_sums(otu_table(ps16S_all)))
+sampling_coverage <- sampling_coverage |>
+  rename("sample_sums(otu_table(ps16S_all))" = "n_seqs") |>
+  tibble::rownames_to_column("SampleID")
+
+# sampling_coverage <- sampling_coverage |>
+#   rename("n_seqs" = "sample_sums(otu_table(ps16S_all))") |>
+#   tibble::rownames_to_column("SampleID")
+
+# any natural breaks in the data?
+sampling_coverage |>
+  ggplot(aes(x = n_seqs)) +
+  geom_histogram() +
+  coord_cartesian(xlim = c(0, 8000)) +
+  ggtitle("Distribution of Reads per Sample [zoomed]") +
+  labs(x = "Total Reads", y = "Number of Samples")
+
+# examine outliers (threshold of ~2000)
+sampling_coverage |>
+  ggplot(aes(x = 1, y = n_seqs)) +
+  geom_jitter() +
+  scale_y_log10()
+
+# arranging samples by abundance (threshold of ~2000)
+sampling_coverage |>
+  arrange(n_seqs) |>
+  ggplot(aes(x = 1:nrow(sampling_coverage), y = n_seqs)) +
+  geom_line() +
+  coord_cartesian(xlim = c(0, 100), ylim = c(0, 5000))
+
+# filter out by threshold of 2000
+sampling_filt <- sampling_coverage |>
+  filter(n_seqs > 2000)
+
+samples_to_keep <- sampling_filt$SampleID
+
+ps16S_filt <- subset_samples(ps16S_all, SampleID %in% samples_to_keep) # 304/357 samples kept
+ps16S_filt_sample_df <- as.data.frame(sample_data(ps16S_filt))
+```
+```{r}
+# saving filtered file
+#saveRDS(ps16S_filt, file = "../data/microbial/TV_16S_4816_filt_pso.rds")
+```
+
+*######################################################################*
+START OF 301 SAMPLE RDS FILTERING & SAVING (114 MEDIA SAMPLES RESULT)
+*######################################################################*
+
+*CC Week 25 Sample Removal*
+```{r}
+#-------------------------------------------------
+# PSO w/ all HRTs REMOVING Week 21 & 25 CC samples
+#-------------------------------------------------
+samples_to_remove <- c("CC_1_25", "CC_2_25", "CC_3_25")
+
+ps16S_final <- prune_samples(!(sample_names(ps16S_filt) %in% samples_to_remove), ps16S_filt) # 2369 taxa, 301 samples
+#saveRDS(ps16S_final, file = "../data/microbial/ps16S_final_301_samps.rds")
+
+# sample data frame
+ps16S_final_df <- as.data.frame(sample_data(ps16S_final))
+```
+
+*Filtered Sample Size Table*
+```{r}
+sample_size_filt_df <- ps16S_final_df |>
+  group_by(SampleType, HRT, SampleSource) |>
+  summarise(n_samples = n(), .groups = "drop")
+
+print(sample_size_filt_df)
+```
+
+*Normal & Equal Variance Stat Tests*
+```{r}
+ps16S_final <- readRDS("../data/microbial/ps16S_final_301_samps.rds")
+
+ps16_sample_df <- as.data.frame(sample_data(ps16S_final))
+
+# extract abundance matrix from phyloseq object
+abundance_matrix <- as(otu_table(ps16S_final), "matrix")
+
+# identify columns with zero variance (all identical values)
+zero_var_cols <- which(apply(abundance_matrix, 2, var) == 0)
+
+# remove zero-variance taxa
+if (length(zero_var_cols) > 0) {
+  abundance_matrix_filtered <- abundance_matrix[, -zero_var_cols]
+} else {
+  abundance_matrix_filtered <- abundance_matrix
+}
+
+# generate Q-Q plots for visual inspection
+par(mfrow = c(1, 3))
+for (i in 1:3) {  # Example for first 3 taxa
+  qqnorm(abundance_matrix_filtered[, i], main = colnames(abundance_matrix_filtered)[i])
+  qqline(abundance_matrix_filtered[, i])
+}
+
+plot(density(abundance_matrix_filtered[, 1]), main = "Taxon Abundance Distribution")
+
+# perform Shapiro-Wilk normality tests - NON NORMAL
+shapiro_results <- apply(abundance_matrix_filtered, 2, shapiro.test)
+lapply(shapiro_results, function(x) x$p.value)  # p < 0.05 indicates non-normality
+
+# Shapiro-Wilk p-value df
+sw_p_values <- sapply(shapiro_results, function(x) x$p.value)
+sw_asv_names <- colnames(abundance_matrix_filtered)
+shapiro_df <- data.frame(
+  ASV = sw_asv_names,
+  p_value = sw_p_values,
+  row.names = NULL
+)
+
+# ------------------------------------------------------------------------------------------------
+
+# perform levene's test for equal variance 
+abundance_df <- as.data.frame(abundance_matrix)
+abundance_df$Sample <- rownames(abundance_matrix)
+abundance_df <- abundance_df |> dplyr::select(Sample, everything())
+
+abundance_long <- pivot_longer(
+  abundance_df,
+  cols = -Sample,
+  names_to = "ASV",
+  values_to = "Abundance"
+)
+
+abundance_long$SampleType <- sapply(abundance_long$Sample, extract_sample_type)
+abundance_long$Bioreactor <- sapply(abundance_long$Sample, extract_bioreactor_id)
+abundance_long <- abundance_long |> dplyr::select(Sample, SampleType, Bioreactor, everything())
+
+leveneTest(Abundance ~ Bioreactor, data = abundance_long) 
+# p < 0.05 indicates non-equal variance (p = 2.121e-08) <- 301 samples
+```
