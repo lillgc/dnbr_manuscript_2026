@@ -269,12 +269,12 @@ ghg_data <- ghg_data |>
   mutate(HRT = factor(HRT, levels = HRT_order))
 ```
 
-*Figure 1A & Stats*
+*Figure 1A & Stats - moved to supplementary 03/18/2026*
 ```{r, fig.width=6, fig.height=6}
 #------------------------------------------------
 # Plot - NRE comparison by bioreactor rep (1-6)
 #------------------------------------------------
-fig1A <- nre_data |>
+newsfig1A <- nre_data |>
   ggplot(aes(bioreactor_ID, removal_efficiency, fill = sample_type)) +
   geom_boxplot() +
   facet_wrap(~HRT) +
@@ -293,6 +293,8 @@ fig1A <- nre_data |>
         axis.text = element_text(size = 13), 
         axis.title = element_text(size = 13),
         legend.text = element_text(size = 13))
+
+#ggsave("../raw_figs_301/dnbr_newsfig_NRE.png", plot = newsfig1A, width = 10, height = 6, units = "in", dpi = 300)
 ```
 ```{r}
 #------------------------------------
@@ -310,7 +312,7 @@ nre_data |>
 #----------------------------------------------------------
 # Plot - NRE comparison across HRT (for each bioreactor)
 #----------------------------------------------------------
-fig1B <- nre_data |>
+newfig1 <- nre_data |>
   ggplot(aes(HRT, removal_efficiency)) +
   geom_boxplot(aes(fill = sample_type)) +
   labs(
@@ -328,6 +330,8 @@ fig1B <- nre_data |>
         axis.text = element_text(size = 13), 
         axis.title = element_text(size = 13),
         legend.text = element_text(size = 13))
+
+#ggsave("../raw_figs_301/dnbr_fig1_NRE.png", plot = newfig1, width = 6, height = 6, units = "in", dpi = 300)
 ```
 ```{r}
 #----------------------------------------------------------
