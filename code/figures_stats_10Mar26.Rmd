@@ -2046,16 +2046,28 @@ KO_strip_text_labs <- c(
            "ko:K00376" = "K00376 (nosZ)"
            )
 
+# KO_strip_text_cols <- c(
+#   "K00370 (narG)" = "grey60", 
+#   "K00374 (narI)" = "grey60", 
+#   "K02567 (napA)" = "grey60", 
+#   "K02568 (napB)" = "grey60", 
+#   "K00368 (nirK)" = "grey80", 
+#   "K15864 (nirS)" = "grey80", 
+#   "K04561 (norB)" = "#aca193", 
+#   "K02305 (norC)" = "#aca193", 
+#   "K00376 (nosZ)" = "grey90"
+# )
+
 KO_strip_text_cols <- c(
   "K00370 (narG)" = "grey60", 
   "K00374 (narI)" = "grey60", 
   "K02567 (napA)" = "grey60", 
   "K02568 (napB)" = "grey60", 
-  "K00368 (nirK)" = "grey80", 
-  "K15864 (nirS)" = "grey80", 
-  "K04561 (norB)" = "#aca193", 
-  "K02305 (norC)" = "#aca193", 
-  "K00376 (nosZ)" = "grey90"
+  "K00368 (nirK)" = "white", 
+  "K15864 (nirS)" = "white", 
+  "K04561 (norB)" = "#B8AB90", 
+  "K02305 (norC)" = "#B8AB90", 
+  "K00376 (nosZ)" = "grey80"
 )
 
 strip <- strip_themed(
@@ -2072,9 +2084,9 @@ steps <- c("NO3->NO2", "NO2->NO", "NO->N2O", "N2O->N2")
 
 reduction_colors <- c(
   "NO3->NO2" = "grey60",
-  "NO2->NO"  = "grey80",
-  "NO->N2O"  = "#aca193",
-  "N2O->N2"  = "grey90"
+  "NO2->NO"  = "white",
+  "NO->N2O"  = "#B8AB90",
+  "N2O->N2"  = "grey80"
 )
 
 reduction_labels <- c(
@@ -2154,6 +2166,7 @@ fig5_final <- fig5 + patchwork::wrap_elements(legend_grob) +
   plot_layout(ncol = 2, widths = c(10, 3))
 
 #ggsave("../raw_figs_301/dnbr_fig5_picrust2.png", plot = fig5_final, width = 9, height = 10, units = "in", dpi = 300)
+#ggsave("../raw_figs_301/dnbr_fig5_picrust2_NEW.png", plot = fig5_final, width = 9, height = 10, units = "in", dpi = 300)
 ```
 
 *NSTI plot - extra - not saved*
@@ -2307,6 +2320,7 @@ sfig6 <- sfig6a + plot_spacer() + sfig6b + plot_spacer() + patchwork::wrap_eleme
 sfig6
 
 #ggsave("../raw_figs_301/dnbr_sfig6_48_picrust2.png", plot = sfig6, width = 14, height = 8, units = "in", dpi = 300)
+#ggsave("../raw_figs_301/dnbr_sfig6_48_picrust2_NEW.png", plot = sfig6, width = 14, height = 8, units = "in", dpi = 300)
 ```
 
 *################################################################################################################*
@@ -2602,7 +2616,7 @@ ggplot(aes(x = Bioreactor, y = Simpson)) +
 #---------------- HEATMAP ----------------
 
 *CC & WC 317 se-asv Phyla by triplicate ID*
-```{r, fig.height=6, fig.width=12}
+```{r, fig.height=6, fig.width=14}
 ps_media_rel_df <- ps_media |>
   psmelt() |>
   as_tibble() |>
@@ -2695,17 +2709,35 @@ heatmap_colors <- c(
 # ps_media_heat_df <- ps_media_heat_df |>
 #   filter(Phylum_ID != "Other")
 
+# adding Time column for axis labels
+
+ps_media_heat_df$Time <- sub(".*_(\\d+)W?$", "\\1", ps_media_heat_df$triplicate_id)
+
+# ordering Time column
+# time_order <- c("0", "4", "7","11", "14", "18", "21",
+#                 "6", "10", "15", "20",
+#                 "21", "28", "29", "30", "31", "32", "33", "34", "35", "36", "37", "38",
+#                 "0", "4", "8", "11", "14", "18", "21",
+#                 "6", "10", "15", "20",
+#                 "21", "24", "27", "28", "29", "30", "31")
+
+time_order <- c("0", "4", "7", "8", "11", "14", "18", "21",
+                "6", "10", "15", "20",
+                "24", "27", "28", "29", "30", "31", "32", "33", "34", "35", "36", "37", "38")
+
+ps_media_heat_df$Time <- factor(ps_media_heat_df$Time, levels = time_order)
+
 # ordering triplicates
-unique(ps_media_heat_df$triplicate_id)
+# unique(ps_media_heat_df$triplicate_id)
+# 
+# triplicate_order <- c("4CC_0", "4CC_4", "4CC_7","4CC_11", "4CC_14", "4CC_18", "4CC_21",  
+#                       "CC_6", "CC_10", "CC_15", "CC_20",  
+#                       "CC_21", "CC_28", "CC_29", "CC_30", "CC_31", "CC_32", "CC_33", "CC_34", "CC_35", "CC_36", "CC_37", "CC_38", 
+#                       "4WC_0", "4WC_4", "4WC_8", "4WC_11", "4WC_14", "4WC_18", "4WC_21",  
+#                       "WC_6", "WC_10", "WC_15", "WC_20", 
+#                       "WC_21", "WC_24", "WC_27", "WC_28", "WC_29", "WC_30", "WC_31")
 
-triplicate_order <- c("4CC_0", "4CC_4", "4CC_7","4CC_11", "4CC_14", "4CC_18", "4CC_21",  
-                      "CC_6", "CC_10", "CC_15", "CC_20",  
-                      "CC_21", "CC_28", "CC_29", "CC_30", "CC_31", "CC_32", "CC_33", "CC_34", "CC_35", "CC_36", "CC_37", "CC_38", 
-                      "4WC_0", "4WC_4", "4WC_8", "4WC_11", "4WC_14", "4WC_18", "4WC_21",  
-                      "WC_6", "WC_10", "WC_15", "WC_20", 
-                      "WC_21", "WC_24", "WC_27", "WC_28", "WC_29", "WC_30", "WC_31")
-
-ps_media_heat_df$triplicate_id <- factor(ps_media_heat_df$triplicate_id, levels = triplicate_order)
+# ps_media_heat_df$triplicate_id <- factor(ps_media_heat_df$triplicate_id, levels = triplicate_order)
 
 new_phyla_taxa_names <- c(
   "Proteobacteria" = "Pseudomonadota", 
@@ -2764,7 +2796,7 @@ new_phyla_taxa_names <- c(
 phyla_heatmap <- ggplot(
   ps_media_heat_df,
   aes(
-    x = triplicate_id,
+    x = Time,
     y = Phylum_ID,
     fill = rel_abund_bin
   )
@@ -2778,13 +2810,13 @@ phyla_heatmap <- ggplot(
   ) +
   scale_y_discrete(labels = new_phyla_taxa_names) +
   labs(
-    x = "Triplicate",
+    x = "Time ID (4-h HRT: day, 8- & 16-h HRT: week)",
     y = "Phylum"
   ) +
   theme_bw() +
   theme(
     panel.grid = element_blank(),
-    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, margin = margin(t = 0, r = 0, b = 10, l = 0)),
     axis.text = element_text(size = 12),
     strip.text = element_text(size = 14),
     axis.title = element_text(size = 14),
@@ -2793,6 +2825,7 @@ phyla_heatmap <- ggplot(
   )
 
 #ggsave("../raw_figs_301/phyla_317_heatmap.png", plot = phyla_heatmap, width = 14, height = 6, units = "in", dpi = 300)
+#ggsave("../raw_figs_301/phyla_317_heatmap_NEW.png", plot = phyla_heatmap, width = 16, height = 7, units = "in", dpi = 300)
 
 # numeric means - Phyla relative abundance by sample type & HRT
 ps_media_phyla_means <- ps_media_heat_df |>
@@ -2883,6 +2916,24 @@ heatmap_colors <- c(
 # ps_media_heat_df <- ps_media_heat_df |>
 #   filter(Genus_ID != "Other")
 
+# adding Time column for axis labels
+
+ps_media_heat_df$Time <- sub(".*_(\\d+)W?$", "\\1", ps_media_heat_df$triplicate_id)
+
+# ordering Time column
+# time_order <- c("0", "4", "7","11", "14", "18", "21",
+#                 "6", "10", "15", "20",
+#                 "21", "28", "29", "30", "31", "32", "33", "34", "35", "36", "37", "38",
+#                 "0", "4", "8", "11", "14", "18", "21",
+#                 "6", "10", "15", "20",
+#                 "21", "24", "27", "28", "29", "30", "31")
+
+time_order <- c("0", "4", "7", "8", "11", "14", "18", "21",
+                "6", "10", "15", "20",
+                "24", "27", "28", "29", "30", "31", "32", "33", "34", "35", "36", "37", "38")
+
+ps_media_heat_df$Time <- factor(ps_media_heat_df$Time, levels = time_order)
+
 # order genera top → bottom (reverse for heatmap aesthetics)
 
 se_asv_genus_map <- c(
@@ -2923,22 +2974,22 @@ ps_media_heat_df$Genus_ID <- factor(
   levels = rev(se_asv_genus_map))
 
 
-# ordering triplicates
-unique(ps_media_heat_df$triplicate_id)
-
-triplicate_order <- c("4CC_0", "4CC_4", "4CC_7","4CC_11", "4CC_14", "4CC_18", "4CC_21",  
-                      "CC_6", "CC_10", "CC_15", "CC_20",  
-                      "CC_21", "CC_28", "CC_29", "CC_30", "CC_31", "CC_32", "CC_33", "CC_34", "CC_35", "CC_36", "CC_37", "CC_38", 
-                      "4WC_0", "4WC_4", "4WC_8", "4WC_11", "4WC_14", "4WC_18", "4WC_21",  
-                      "WC_6", "WC_10", "WC_15", "WC_20", 
-                      "WC_21", "WC_24", "WC_27", "WC_28", "WC_29", "WC_30", "WC_31")
-
-ps_media_heat_df$triplicate_id <- factor(ps_media_heat_df$triplicate_id, levels = triplicate_order)
+# # ordering triplicates
+# unique(ps_media_heat_df$triplicate_id)
+# 
+# triplicate_order <- c("4CC_0", "4CC_4", "4CC_7","4CC_11", "4CC_14", "4CC_18", "4CC_21",  
+#                       "CC_6", "CC_10", "CC_15", "CC_20",  
+#                       "CC_21", "CC_28", "CC_29", "CC_30", "CC_31", "CC_32", "CC_33", "CC_34", "CC_35", "CC_36", "CC_37", "CC_38", 
+#                       "4WC_0", "4WC_4", "4WC_8", "4WC_11", "4WC_14", "4WC_18", "4WC_21",  
+#                       "WC_6", "WC_10", "WC_15", "WC_20", 
+#                       "WC_21", "WC_24", "WC_27", "WC_28", "WC_29", "WC_30", "WC_31")
+# 
+# ps_media_heat_df$triplicate_id <- factor(ps_media_heat_df$triplicate_id, levels = triplicate_order)
 
 genera_heatmap <- ggplot(
   ps_media_heat_df,
   aes(
-    x = triplicate_id,
+    x = Time,
     y = Genus_ID,
     fill = rel_abund_bin
   )
@@ -2951,13 +3002,13 @@ genera_heatmap <- ggplot(
     drop = FALSE
   ) +
   labs(
-    x = "Triplicate",
+    x = "Time ID (4-h HRT: day, 8- & 16-h HRT: week)",
     y = "Genus"
   ) +
   theme_bw() +
   theme(
     panel.grid = element_blank(),
-    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 10),
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 10, margin = margin(t = 0, r = 0, b = 10, l = 0)),
     axis.text.y = element_text(size = 6),
     strip.text = element_text(size = 14),
     axis.title = element_text(size = 14),
@@ -2966,4 +3017,5 @@ genera_heatmap <- ggplot(
   )
 
 #ggsave("../raw_figs_301/genera_317_heatmap.png", plot = genera_heatmap, width = 20, height = 13, units = "in", dpi = 300)
+#ggsave("../raw_figs_301/genera_317_heatmap_NEW.png", plot = genera_heatmap, width = 20, height = 13, units = "in", dpi = 300)
 ```
